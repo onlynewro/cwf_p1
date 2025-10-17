@@ -18,3 +18,4 @@ run:
   workers: -1
   maxiter: 1000
   output: fit_results.json
+  save_intermediate: false

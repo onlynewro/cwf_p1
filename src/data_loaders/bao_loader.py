@@ -30,6 +30,7 @@ class BAOData:
         self._covariance_used_last = False
         self._default_use_covariance = use_official_covariance
         self._include_proxy = include_proxy
+        self.source_files = []
 
         data_file = filename or self.config.get('data_file')
         if data_file:
@@ -107,6 +108,7 @@ class BAOData:
         except OSError as exc:  # pragma: no cover - unlikely I/O failure
             raise ConfigValidationError(f"Could not read BAO data file {resolved}: {exc}") from exc
 
+        self.source_files = [str(resolved)]
         self.data = [self._normalize_entry(entry) for entry in raw_data]
         self._base_data = copy.deepcopy(self.data)
 
@@ -140,6 +142,7 @@ class BAOData:
             entry_spec['z_override'] = spec['z']
 
         entry = self._load_official_entry(entry_spec, use_official_covariance)
+        self.source_files.extend(filter(None, [str(mean_path), str(cov_path) if cov_path else None]))
         return entry
 
     def _load_official_entry(self, spec, use_official_covariance):
@@ -442,7 +445,7 @@ class BAOData:
                 count += 1
         return count
 
-    def print_residual_table(self, model, params, rd_value=147.0, title=None):
+    def print_residual_table(self, model, params, rd_value=147.0, title=None, *, return_dataframe=False):
         """Print a table comparing observations and theory for BAO data."""
         rows = []
         max_abs_pull = 0.0
@@ -548,10 +551,15 @@ class BAOData:
             rows.append(row)
 
         if not rows:
+            if return_dataframe:
+                return pd.DataFrame(rows), 0.0
             print("(No BAO observables to display)")
             return 0.0
 
         df = pd.DataFrame(rows)
+        if return_dataframe:
+            return df, max_abs_pull
+
         if title:
             print(title)
         with pd.option_context('display.float_format', '{:,.3f}'.format):
