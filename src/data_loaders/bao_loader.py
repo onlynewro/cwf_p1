@@ -3,101 +3,148 @@ from __future__ import annotations
 
 import copy
 import json
-import os
+from pathlib import Path
 from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
 
 from src.utils.cosmology import C_LIGHT, comoving_distance
+from src.utils.validation import ConfigValidationError, require_existing_file
 
 
 class BAOData:
     """BAO data handler."""
 
-    OFFICIAL_DATASETS = [
-        {
-            'name': 'DESI LRG GCcomb z=0.4-0.6',
-            'mean_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_cov.txt'
-        },
-        {
-            'name': 'DESI LRG GCcomb z=0.6-0.8',
-            'mean_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_cov.txt'
-        },
-        {
-            'name': 'DESI Lyα GCcomb',
-            'mean_file': 'desi_2024_gaussian_bao_Lya_GCcomb_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_Lya_GCcomb_cov.txt'
-        }
-    ]
+    def __init__(self, filename=None, use_official_covariance=None, include_proxy=None, config=None):
+        self.config = config or {}
+        self._config_base = Path(self.config.get('base_dir', '.'))
 
-    def __init__(self, filename=None, use_official_covariance=True, include_proxy=True):
+        if use_official_covariance is None:
+            use_official_covariance = self.config.get('use_official_covariance', True)
+        if include_proxy is None:
+            include_proxy = self.config.get('include_proxy', True)
+
         self.data = []
         self._base_data = []
         self._covariance_used_last = False
         self._default_use_covariance = use_official_covariance
         self._include_proxy = include_proxy
-        if filename and os.path.exists(filename):
-            self.load_from_file(filename)
-        else:
-            self.load_default(use_official_covariance=use_official_covariance,
-                               include_proxy=include_proxy)
 
-    def load_default(self, use_official_covariance=True, include_proxy=True):
-        """Load official DESI BAO data with optional covariance usage."""
-        try:
-            entries = []
-            for spec in self.OFFICIAL_DATASETS:
-                entry = self._load_official_entry(spec, use_official_covariance)
+        data_file = filename or self.config.get('data_file')
+        if data_file:
+            resolved = require_existing_file(
+                data_file,
+                base_dir=self._config_base,
+                description='BAO data file'
+            )
+            self.load_from_file(resolved)
+        else:
+            self.load_from_config(
+                use_official_covariance=use_official_covariance,
+                include_proxy=include_proxy,
+            )
+
+    def load_from_config(self, use_official_covariance=True, include_proxy=True):
+        """Load BAO datasets based on the provided configuration."""
+        datasets = self.config.get('datasets') or []
+        entries = []
+
+        if datasets:
+            for spec in datasets:
+                entry = self._load_dataset_entry(spec, use_official_covariance)
                 entries.append(entry)
 
             if include_proxy:
-                qso_fallback = {
-                    'name': 'Legacy QSO proxy',
-                    'z': 1.48,
-                    'DM_over_rd': 26.07,
-                    'err_DM': 0.67,
-                    'DH_over_rd': None,
-                    'err_DH': None
-                }
-                entries.append(self._normalize_entry(qso_fallback))
+                proxy = self.config.get('legacy_proxy') or self._legacy_proxy_entry()
+                if proxy:
+                    entries.append(self._normalize_entry(proxy))
+        else:
+            entries = self._legacy_default_entries(include_proxy=include_proxy)
 
-            self.data = entries
-            self._base_data = copy.deepcopy(self.data)
-        except FileNotFoundError:
-            default_entries = [
-                {'name': 'LRG_0.6', 'z': 0.51, 'DM_over_rd': 13.62, 'err_DM': 0.25,
-                 'DH_over_rd': None, 'err_DH': None},
-                {'name': 'LRG_0.8', 'z': 0.71, 'DM_over_rd': 16.85, 'err_DM': 0.33,
-                 'DH_over_rd': None, 'err_DH': None},
-                {'name': 'QSO', 'z': 1.48, 'DM_over_rd': 26.07, 'err_DM': 0.67,
-                 'DH_over_rd': None, 'err_DH': None},
-                {'name': 'Lya_1', 'z': 2.33, 'DM_over_rd': 37.41, 'err_DM': 1.86,
-                 'DH_over_rd': 9.08, 'err_DH': 0.34},
-            ]
-            self.data = [self._normalize_entry(entry) for entry in default_entries]
-            self._base_data = copy.deepcopy(self.data)
+        self.data = entries
+        self._base_data = copy.deepcopy(self.data)
+
+    def _legacy_default_entries(self, include_proxy=True):
+        defaults = [
+            {'name': 'LRG_0.6', 'z': 0.51, 'DM_over_rd': 13.62, 'err_DM': 0.25,
+             'DH_over_rd': None, 'err_DH': None},
+            {'name': 'LRG_0.8', 'z': 0.71, 'DM_over_rd': 16.85, 'err_DM': 0.33,
+             'DH_over_rd': None, 'err_DH': None},
+            {'name': 'Lya_1', 'z': 2.33, 'DM_over_rd': 37.41, 'err_DM': 1.86,
+             'DH_over_rd': 9.08, 'err_DH': 0.34},
+        ]
+        entries = [self._normalize_entry(entry) for entry in defaults]
+        if include_proxy:
+            proxy = self.config.get('legacy_proxy') or self._legacy_proxy_entry()
+            if proxy:
+                entries.append(self._normalize_entry(proxy))
+        return entries
+
+    @staticmethod
+    def _legacy_proxy_entry():
+        return {
+            'name': 'Legacy QSO proxy',
+            'z': 1.48,
+            'DM_over_rd': 26.07,
+            'err_DM': 0.67,
+            'DH_over_rd': None,
+            'err_DH': None,
+        }
 
     def load_from_file(self, filename):
         """Load BAO data from JSON file."""
+        resolved = require_existing_file(
+            filename,
+            base_dir=self._config_base,
+            description='BAO data file'
+        )
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
+            with open(resolved, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
-                self.data = [self._normalize_entry(entry) for entry in raw_data]
-                self._base_data = copy.deepcopy(self.data)
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Warning: Could not load BAO data from {filename}: {exc}")
-            print("Using default BAO data...")
-            self.load_default(use_official_covariance=self._default_use_covariance)
+        except json.JSONDecodeError as exc:  # pragma: no cover - configuration error
+            raise ConfigValidationError(f"Could not parse BAO data JSON from {resolved}: {exc}") from exc
+        except OSError as exc:  # pragma: no cover - unlikely I/O failure
+            raise ConfigValidationError(f"Could not read BAO data file {resolved}: {exc}") from exc
+
+        self.data = [self._normalize_entry(entry) for entry in raw_data]
+        self._base_data = copy.deepcopy(self.data)
+
+    def _load_dataset_entry(self, spec, use_official_covariance):
+        name = spec.get('name', 'BAO dataset')
+        mean_key = spec.get('mean') or spec.get('mean_file') or spec.get('mean_path')
+        if mean_key is None:
+            raise ConfigValidationError(
+                f"BAO dataset '{name}' is missing a mean file path in the configuration"
+            )
+
+        mean_path = require_existing_file(
+            mean_key,
+            base_dir=self._config_base,
+            description=f"BAO mean file for {name}"
+        )
+
+        cov_key = spec.get('covariance') or spec.get('cov_file') or spec.get('covariance_path')
+        cov_path = None
+        if cov_key is not None:
+            cov_path = require_existing_file(
+                cov_key,
+                base_dir=self._config_base,
+                description=f"BAO covariance file for {name}"
+            )
+
+        entry_spec = {'name': name, 'mean_file': mean_path}
+        if cov_path is not None:
+            entry_spec['cov_file'] = cov_path
+        if spec.get('z') is not None:
+            entry_spec['z_override'] = spec['z']
+
+        entry = self._load_official_entry(entry_spec, use_official_covariance)
+        return entry
 
     def _load_official_entry(self, spec, use_official_covariance):
         mean_path = spec['mean_file']
         cov_path = spec.get('cov_file')
-
-        if not os.path.exists(mean_path):
-            raise FileNotFoundError(mean_path)
 
         raw_order = []
         values = {}
@@ -122,7 +169,7 @@ class BAOData:
 
         entry = {
             'name': spec['name'],
-            'z': z_ref,
+            'z': spec.get('z_override', z_ref),
             'DM_over_rd': values.get('DM_over_rd'),
             'DH_over_rd': values.get('DH_over_rd'),
             'err_DM': None,
@@ -135,7 +182,7 @@ class BAOData:
         if entry['DH_over_rd'] is not None:
             target_order.append('DH_over_rd')
 
-        if use_official_covariance and cov_path and os.path.exists(cov_path):
+        if use_official_covariance and cov_path:
             cov = np.loadtxt(cov_path)
             cov = np.array(cov, dtype=float)
             if cov.ndim == 0:
@@ -160,7 +207,7 @@ class BAOData:
                 elif key == 'DH_over_rd':
                     entry['err_DH'] = float(diag[idx])
         else:
-            if cov_path and os.path.exists(cov_path):
+            if cov_path:
                 diag_cov = np.loadtxt(cov_path)
                 diag_cov = np.array(diag_cov, dtype=float)
                 diag_cov = np.atleast_2d(diag_cov)

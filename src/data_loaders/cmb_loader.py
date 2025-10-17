@@ -21,7 +21,13 @@ class CMBData:
         [-1.1244e-05, -2.1980e-03, 4.1600e-06]
     ])
 
-    def __init__(self, mean_vector=None, covariance=None):
+    def __init__(self, mean_vector=None, covariance=None, config=None):
+        self.config = config or {}
+        if mean_vector is None:
+            mean_vector = self.config.get('mean')
+        if covariance is None:
+            covariance = self.config.get('covariance')
+
         self.mean = np.array(mean_vector if mean_vector is not None else self.PLANCK2018_MEAN, dtype=float)
         self.cov = np.array(covariance if covariance is not None else self.PLANCK2018_COV, dtype=float)
         if self.mean.shape != (3,):

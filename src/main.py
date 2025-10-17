@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import multiprocessing as mp
 import sys
 from functools import partial
+from pathlib import Path
 
 import numpy as np
+import yaml
 from scipy.optimize import differential_evolution
 
 from src.data_loaders.bao_loader import BAOData
@@ -23,22 +26,84 @@ from joint_fit_multiproc import (
     estimate_covariance,
     total_chi2,
 )
+from src.utils.validation import ConfigValidationError, require_existing_file
 
 
-def main():
-    parser = argparse.ArgumentParser(description='7D Cosmology Joint Fitting')
-    parser.add_argument('--model', choices=['LCDM', '7D', 'both'], default='both',
-                        help='Model to fit')
-    parser.add_argument('--bao-file', type=str, default=None,
+def _safe_load_yaml(path):
+    with open(path, 'r', encoding='utf-8') as handle:
+        loaded = yaml.safe_load(handle)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ConfigValidationError(
+            f"YAML file {path} must contain a mapping at the top level"
+        )
+    return loaded
+
+
+def _load_configuration(config_path):
+    resolved = require_existing_file(
+        config_path,
+        description='analysis configuration file'
+    )
+    config_dir = Path(resolved).parent
+    config_data = _safe_load_yaml(resolved)
+    config_data['config_path'] = str(resolved)
+    config_data['config_dir'] = str(config_dir)
+
+    paths_file = config_data.get('paths_file')
+    paths_data = {}
+    if paths_file:
+        resolved_paths = require_existing_file(
+            paths_file,
+            base_dir=config_dir,
+            description='paths configuration file'
+        )
+        paths_dir = Path(resolved_paths).parent
+        raw_paths = _safe_load_yaml(resolved_paths)
+        for name, section in raw_paths.items():
+            if not isinstance(section, dict):
+                raise ConfigValidationError(
+                    f"Section '{name}' in {resolved_paths} must be a mapping"
+                )
+            section_copy = copy.deepcopy(section)
+            base_dir_value = section_copy.get('base_dir')
+            if base_dir_value is None:
+                resolved_base = paths_dir
+            else:
+                resolved_base = (paths_dir / base_dir_value).resolve()
+            section_copy['base_dir'] = str(resolved_base)
+            paths_data[name] = section_copy
+
+    config_data['paths'] = paths_data
+    return config_data
+
+
+def _build_parsers():
+    base_parser = argparse.ArgumentParser(add_help=False)
+    base_parser.add_argument(
+        '--config',
+        type=str,
+        default='config/default_config.yaml',
+        help='Path to the YAML configuration file'
+    )
+
+    parser = argparse.ArgumentParser(
+        description='7D Cosmology Joint Fitting',
+        parents=[base_parser]
+    )
+    parser.add_argument('--model', choices=['LCDM', '7D', 'both'],
+                        help='Model to fit (default from configuration)')
+    parser.add_argument('--bao-file', type=str,
                         help='BAO data file (JSON)')
-    parser.add_argument('--sn-file', type=str, default=None,
+    parser.add_argument('--sn-file', type=str,
                         help='Supernova data file')
     parser.add_argument('--use-cmb', action='store_true',
                         help='Include CMB constraints')
     parser.add_argument('--use-default-bao', action='store_true',
                         help='Load the packaged DESI BAO catalogue when no file is supplied')
-    parser.add_argument('--rd-mode', choices=['fixed', 'fit'], default='fixed',
-                        help='Sound horizon mode')
+    parser.add_argument('--rd-mode', choices=['fixed', 'fit'],
+                        help='Sound horizon mode (default from configuration)')
     parser.add_argument('--disable-bao-cov', action='store_true',
                         help='Ignore supplied BAO covariance matrices')
     parser.add_argument('--no-proxy', action='store_true',
@@ -47,14 +112,70 @@ def main():
                         help='Remove the Lyα DH/rd point from the final fit')
     parser.add_argument('--diagnose-lya-dh', action='store_true',
                         help='Temporarily inspect residuals without the Lyα DH/rd point before fitting')
-    parser.add_argument('--workers', type=int, default=-1,
+    parser.add_argument('--workers', type=int,
                         help='Number of workers for parallelization (-1 for all CPUs)')
-    parser.add_argument('--maxiter', type=int, default=1000,
+    parser.add_argument('--maxiter', type=int,
                         help='Maximum iterations for optimization')
-    parser.add_argument('--output', type=str, default='fit_results.json',
+    parser.add_argument('--output', type=str,
                         help='Output file for results')
+    return base_parser, parser
 
-    args = parser.parse_args()
+
+def _merge_section(config_data, section_name):
+    merged = {}
+    paths_section = config_data.get('paths', {}).get(section_name)
+    if isinstance(paths_section, dict):
+        merged = copy.deepcopy(paths_section)
+    section_override = config_data.get(section_name)
+    if isinstance(section_override, dict):
+        for key, value in section_override.items():
+            merged[key] = value
+    if 'base_dir' not in merged and 'config_dir' in config_data:
+        merged['base_dir'] = config_data['config_dir']
+    return merged
+
+
+def main():
+    base_parser, parser = _build_parsers()
+    preliminary_args, remaining = base_parser.parse_known_args()
+
+    try:
+        config_data = _load_configuration(preliminary_args.config)
+    except ConfigValidationError as exc:
+        print(f"Configuration error: {exc}")
+        return {}
+
+    run_defaults = config_data.get('run', {})
+    bao_defaults = _merge_section(config_data, 'bao')
+    cmb_defaults = _merge_section(config_data, 'cmb')
+
+    parser.set_defaults(
+        model=run_defaults.get('model', 'both'),
+        rd_mode=run_defaults.get('rd_mode', 'fixed'),
+        workers=run_defaults.get('workers', -1),
+        maxiter=run_defaults.get('maxiter', 1000),
+        output=run_defaults.get('output', 'fit_results.json'),
+        use_cmb=cmb_defaults.get('enabled', False),
+        disable_bao_cov=not bao_defaults.get('use_official_covariance', True),
+        no_proxy=not bao_defaults.get('include_proxy', True),
+    )
+    parser.set_defaults(config=preliminary_args.config)
+
+    args = parser.parse_args(remaining)
+
+    bao_config = _merge_section(config_data, 'bao')
+    sn_config = _merge_section(config_data, 'sn')
+    cmb_config = _merge_section(config_data, 'cmb')
+
+    use_covariance = bao_config.get('use_official_covariance', True)
+    if args.disable_bao_cov:
+        use_covariance = False
+    bao_config['use_official_covariance'] = use_covariance
+
+    include_proxy = bao_config.get('include_proxy', True)
+    if args.no_proxy:
+        include_proxy = False
+    bao_config['include_proxy'] = include_proxy
 
     if args.workers == -1:
         args.workers = mp.cpu_count()
@@ -65,29 +186,41 @@ def main():
     print("\nLoading datasets...")
     datasets = {'bao': None, 'sn': None, 'cmb': None}
 
-    use_covariance = not args.disable_bao_cov
-    bao_requested = bool(args.bao_file) or args.use_default_bao
+    bao_requested = bool(
+        args.bao_file
+        or args.use_default_bao
+        or bao_config.get('data_file')
+        or bao_config.get('datasets')
+    )
     if bao_requested:
-        bao_source = args.bao_file if args.bao_file else 'default DESI catalogue'
-        bao_data = BAOData(
-            args.bao_file if args.bao_file else None,
-            use_official_covariance=use_covariance,
-            include_proxy=not args.no_proxy
-        )
-        if args.disable_bao_cov:
-            bao_data.remove_all_covariances()
-        datasets['bao'] = bao_data
-        print(f"  BAO: {bao_data.count_observables()} observables from {len(bao_data.data)} entries loaded")
-        print(f"      source: {bao_source}")
-        cov_entries = bao_data.covariance_entry_count()
-        if cov_entries:
-            print(f"      covariance provided for {cov_entries} BAO entries")
-    else:
-        print("  BAO: skipped (no file provided)")
-
-    if args.sn_file:
+        bao_source = args.bao_file or bao_config.get('data_file') or 'configuration datasets'
         try:
-            sn_data = SNData(args.sn_file)
+            bao_data = BAOData(
+                args.bao_file if args.bao_file else None,
+                use_official_covariance=use_covariance,
+                include_proxy=include_proxy,
+                config=bao_config,
+            )
+        except ConfigValidationError as exc:
+            print(f"  BAO: configuration error ({exc})")
+            datasets['bao'] = None
+        else:
+            if args.disable_bao_cov:
+                bao_data.remove_all_covariances()
+            datasets['bao'] = bao_data
+            print(f"  BAO: {bao_data.count_observables()} observables from {len(bao_data.data)} entries loaded")
+            print(f"      source: {bao_source}")
+            cov_entries = bao_data.covariance_entry_count()
+            if cov_entries:
+                print(f"      covariance provided for {cov_entries} BAO entries")
+    else:
+        print("  BAO: skipped (no configuration or file provided)")
+
+    sn_file = args.sn_file if args.sn_file else sn_config.get('file')
+    sn_marginalize = sn_config.get('marginalize_m', True)
+    if sn_file:
+        try:
+            sn_data = SNData(sn_file, marginalize_m=sn_marginalize, config=sn_config)
             datasets['sn'] = sn_data
             sn_summary = sn_data.summary()
             print(f"  SN: {sn_summary['count']} points loaded (cov rank = {sn_summary['cov_rank']})")
@@ -99,6 +232,9 @@ def main():
                 print(f"      covariance: {cov_source}")
             else:
                 print("      covariance: none")
+        except ConfigValidationError as exc:
+            print(f"  Warning: SN configuration error ({exc})")
+            datasets['sn'] = None
         except Exception as exc:  # pylint: disable=broad-except
             print(f"  Warning: failed to load SN data ({exc})")
             datasets['sn'] = None
@@ -106,7 +242,7 @@ def main():
         datasets['sn'] = None
 
     if args.use_cmb:
-        datasets['cmb'] = CMBData()
+        datasets['cmb'] = CMBData(config=cmb_config)
         print("  CMB: constraints loaded")
     else:
         datasets['cmb'] = None
@@ -159,7 +295,8 @@ def main():
             print("\n  Warning: cannot drop Lyα DH/rd because BAO data are not loaded")
 
     final_bao_count = datasets['bao'].count_observables() if datasets['bao'] is not None else 0
-    print(f"  BAO (final): {final_bao_count} observables from {len(datasets['bao'].data) if datasets['bao'] else 0} entries in use")
+    final_bao_entries = len(datasets['bao'].data) if datasets['bao'] else 0
+    print(f"  BAO (final): {final_bao_count} observables from {final_bao_entries} entries in use")
     final_cov_entries = datasets['bao'].covariance_entry_count() if datasets['bao'] is not None else 0
     if final_cov_entries:
         print(f"    Covariance applied to {final_cov_entries} BAO entries")
@@ -375,6 +512,9 @@ def cli():
         mp.freeze_support()
     try:
         main()
+    except ConfigValidationError as exc:
+        print(f"\nConfiguration error: {exc}")
+        sys.exit(2)
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")
         sys.exit(1)

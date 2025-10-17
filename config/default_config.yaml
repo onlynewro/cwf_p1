@@ -1,0 +1,20 @@
+paths_file: config/paths.yaml
+
+bao:
+  data_file: null
+  use_official_covariance: true
+  include_proxy: true
+
+sn:
+  file: null
+  marginalize_m: true
+
+cmb:
+  enabled: false
+
+run:
+  model: both
+  rd_mode: fixed
+  workers: -1
+  maxiter: 1000
+  output: fit_results.json

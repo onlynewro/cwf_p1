@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -10,12 +11,17 @@ from pandas.api.types import is_categorical_dtype
 from scipy.linalg import cho_factor, cho_solve
 
 from src.utils.cosmology import luminosity_distance
+from src.utils.validation import require_existing_file
 
 
 class SNData:
     """Supernova distance modulus data handler."""
 
-    def __init__(self, filename=None, marginalize_m=True):
+    def __init__(self, filename=None, marginalize_m=None, config=None):
+        self.config = config or {}
+        self._config_base = Path(self.config.get('base_dir', '.'))
+        if marginalize_m is None:
+            marginalize_m = self.config.get('marginalize_m', True)
         self.data = []
         self.z = np.array([])
         self.mu_obs = np.array([])
@@ -31,8 +37,14 @@ class SNData:
         self._column_map = {'z': None, 'mu': None, 'sigma': None}
         self._cov_source = None
         self._cov_rank = 0
-        if filename and os.path.exists(filename):
-            self.load_from_file(filename)
+        data_file = filename or self.config.get('file')
+        if data_file:
+            resolved = require_existing_file(
+                data_file,
+                base_dir=self._config_base,
+                description='SN data file'
+            )
+            self.load_from_file(resolved)
 
     @staticmethod
     def _normalize_column_name(name):
@@ -162,7 +174,12 @@ class SNData:
 
     def load_from_file(self, filename):
         """Load SN data from a text (or Pantheon+) file."""
-        self.source_file = filename
+        resolved = require_existing_file(
+            filename,
+            base_dir=self._config_base,
+            description='SN data file'
+        )
+        self.source_file = resolved
         parse_attempts = [
             {"comment": '#', "sep": None, "engine": 'python'},
             {"comment": None, "sep": None, "engine": 'python'},
@@ -178,7 +195,7 @@ class SNData:
             try:
                 read_kwargs = dict(options)
                 df_candidate = pd.read_csv(
-                    filename,
+                    resolved,
                     skipinitialspace=True,
                     **read_kwargs,
                 )
