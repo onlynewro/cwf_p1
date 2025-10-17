@@ -11,5 +11,6 @@ def test_pantheon_shoes_file_loads_all_entries(tmp_path):
     sn_data = SNData('Pantheon+SH0ES.dat', config={'base_dir': '.'})
 
     assert sn_data.count_points() == 1701
+    assert sn_data.column_mapping()['z'] == 'zHD'
     assert sn_data.column_mapping()['mu'] == 'MU_SH0ES'
     assert sn_data.mu_obs[0] == sn_data.data.loc[sn_data.data.index[0], 'MU_SH0ES']

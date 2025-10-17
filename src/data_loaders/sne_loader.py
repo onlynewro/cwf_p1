@@ -211,7 +211,7 @@ class SNData:
 
             z_series, z_col = self._extract_column(
                 df_candidate,
-                ['z', 'redshift', 'zcmb', 'zcmbhel'],
+                ['zHD', 'z', 'redshift', 'zhel', 'zcmb', 'zcmbhel'],
                 lookup,
             )
             mu_series, mu_col = self._extract_column(
