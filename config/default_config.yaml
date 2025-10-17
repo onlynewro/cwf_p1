@@ -1,4 +1,4 @@
-paths_file: config/paths.yaml
+paths_file: paths.yaml
 
 bao:
   data_file: null
