@@ -39,6 +39,16 @@ The repository ships with reproducible environment specifications for both `pip`
 
    or, if you use [mamba](https://mamba.readthedocs.io/en/latest/), replace `conda` with `mamba` in the commands above.
 
+## Quickstart
+
+Once the dependencies are installed and the environment is activated, run the default configuration directly from the repository root:
+
+```bash
+python -m src.main
+```
+
+If you encounter `ModuleNotFoundError` messages (for example, missing `numpy`), double-check that the virtual environment is active and that `pip install -r requirements.txt` has completed successfully.
+
 ## Container builds
 
 The Docker build context now includes both `requirements.txt` and `environment.yml`, enabling containerized workflows to reuse the same pinned dependency set.
