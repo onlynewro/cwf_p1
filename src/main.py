@@ -27,7 +27,8 @@ from src.data_loaders.cmb_loader import CMBData
 from src.data_loaders.sne_loader import SNData
 from src.models.lcdm import LCDMModel
 from src.models.rd_fit_wrapper import RDFitWrapper
-from src.models.seven_d import SevenDModel
+from src.models.cwf import CWFModel
+from src.utils.cosmology import DEFAULT_RD_MPC
 from src.utils.logging_config import (
     StructuredLogger,
     build_run_metadata,
@@ -96,10 +97,10 @@ def _build_parsers():
     )
 
     parser = argparse.ArgumentParser(
-        description='7D Cosmology Joint Fitting',
+        description='CWF Cosmology Joint Fitting',
         parents=[base_parser]
     )
-    parser.add_argument('--model', choices=['LCDM', '7D', 'both'],
+    parser.add_argument('--model', choices=['LCDM', 'CWF', 'both'],
                         help='Model to fit (default from configuration)')
     parser.add_argument('--bao-file', type=str,
                         help='BAO data file (JSON)')
@@ -208,7 +209,7 @@ def main():
             'rd_mode': args.rd_mode,
             'workers': args.workers,
         },
-        message='=== 7D Cosmology Joint Fitting ==='
+        message='=== CWF Cosmology Joint Fitting ==='
     )
     run_logger.log_event(
         'runtime_configuration',
@@ -397,7 +398,7 @@ def main():
         fid_df, fid_max_pull = datasets['bao'].print_residual_table(
             fid_lcdm,
             fid_params,
-            rd_value=147.0,
+            rd_value=DEFAULT_RD_MPC,
             return_dataframe=True,
         )
         if save_intermediate and fid_df is not None:
@@ -416,7 +417,12 @@ def main():
 
         max_frac = 0.0
         for point in datasets['bao'].data:
-            obs_vec, theory_vec, _ = datasets['bao']._collect_observables(point, fid_lcdm, fid_params, 147.0)
+            obs_vec, theory_vec, _ = datasets['bao']._collect_observables(
+                point,
+                fid_lcdm,
+                fid_params,
+                DEFAULT_RD_MPC,
+            )
             if obs_vec is None or obs_vec.size == 0:
                 continue
             frac_diff = np.abs(obs_vec - theory_vec) / obs_vec
@@ -447,7 +453,7 @@ def main():
                     diag_df, diag_pull = datasets['bao'].print_residual_table(
                         fid_lcdm,
                         fid_params,
-                        rd_value=147.0,
+                        rd_value=DEFAULT_RD_MPC,
                         title='(Lyα DH/rd temporarily removed)',
                         return_dataframe=True,
                     )
@@ -525,8 +531,8 @@ def main():
     models_to_fit = []
     if args.model in ['LCDM', 'both']:
         models_to_fit.append(LCDMModel())
-    if args.model in ['7D', 'both']:
-        models_to_fit.append(SevenDModel())
+    if args.model in ['CWF', 'both']:
+        models_to_fit.append(CWFModel())
 
     if args.rd_mode == 'fit':
         models_to_fit = [RDFitWrapper(model) for model in models_to_fit]
@@ -622,7 +628,14 @@ def main():
                         message='Unexpected error during covariance estimation.'
                     )
 
-            stats = calculate_statistics(de_res.fun, n_data, len(model.param_names))
+            chi2_total_value, chi2_components = total_chi2(
+                theta_hat,
+                datasets=datasets,
+                model=model,
+                rd_mode=args.rd_mode,
+                return_components=True,
+            )
+            stats = calculate_statistics(chi2_total_value, n_data, len(model.param_names))
 
             best_fit_parameters = {
                 name: float(value)
@@ -638,6 +651,18 @@ def main():
                 'n_data': int(stats.get('n_data', n_data)),
                 'n_params': int(stats.get('n_params', len(model.param_names)))
             }
+            component_payload = {
+                key: _finite_float_or_none(value)
+                for key, value in chi2_components.items()
+            }
+            breakdown_terms = [
+                f"{key}={value}"
+                for key, value in component_payload.items()
+                if value is not None
+            ]
+            breakdown_message = "χ² breakdown " + (
+                ", ".join(breakdown_terms) if breakdown_terms else "no finite components"
+            )
 
             results[model.name] = {
                 'success': bool(de_res.success),
@@ -651,6 +676,7 @@ def main():
                 'n_data': stats_native['n_data'],
                 'n_params': stats_native['n_params'],
                 'statistics': stats_native,
+                'chi2_components': component_payload,
                 'message': str(de_res.message),
                 'nfev': int(de_res.nfev),
                 'errors': errors_payload,
@@ -697,11 +723,16 @@ def main():
 
             run_logger.log_event(
                 'model_fit.statistics',
-                {'model': model.name, **stats_native},
+                {'model': model.name, **stats_native, 'chi2_components': component_payload},
                 message=(
                     f"{model.name} statistics: χ²={stats_native['chi2']}, χ²/dof={stats_native['chi2_red']}, "
                     f"AIC={stats_native['aic']}, BIC={stats_native['bic']}"
                 )
+            )
+            run_logger.log_event(
+                'model_fit.chi2_breakdown',
+                {'model': model.name, **component_payload},
+                message=breakdown_message,
             )
 
             if save_intermediate:
@@ -737,7 +768,7 @@ def main():
                     )
 
             if datasets['bao'] is not None and datasets['bao'].count_observables() > 0:
-                rd_for_residuals = 147.0
+                rd_for_residuals = DEFAULT_RD_MPC
                 if args.rd_mode == 'fit' and 'rd' in model.param_names:
                     rd_index = model.param_names.index('rd')
                     rd_candidate = de_res.x[rd_index]
@@ -778,17 +809,19 @@ def main():
                 'error': str(exc)
             }
 
-    if 'LCDM' in results and '7D' in results:
-        if results['LCDM'].get('success') and results['7D'].get('success'):
-            delta_aic = results['7D']['statistics']['aic'] - results['LCDM']['statistics']['aic']
-            delta_bic = results['7D']['statistics']['bic'] - results['LCDM']['statistics']['bic']
+    if 'LCDM' in results and 'CWF' in results:
+        if results['LCDM'].get('success') and results['CWF'].get('success'):
+            delta_aic = results['CWF']['statistics']['aic'] - results['LCDM']['statistics']['aic']
+            delta_bic = results['CWF']['statistics']['bic'] - results['LCDM']['statistics']['bic']
             run_logger.log_event(
-                'model_comparison',
+                'model_comparison.delta_information_criteria',
                 {
                     'delta_aic': delta_aic,
                     'delta_bic': delta_bic,
+                    'reference': 'LCDM',
+                    'model': 'CWF',
                 },
-                message=f"Model comparison ΔAIC (7D-ΛCDM) = {delta_aic:.3f}, ΔBIC = {delta_bic:.3f}"
+                message=f"Model comparison ΔAIC (CWF-ΛCDM) = {delta_aic:.3f}, ΔBIC = {delta_bic:.3f}"
             )
 
     output_relative = Path(args.output)

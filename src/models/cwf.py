@@ -1,4 +1,4 @@
-"""Seven-dimensional cosmology model definition."""
+"""CWF cosmology model definition."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,10 +11,10 @@ from src.utils.cosmology import omega_radiation_fraction
 
 
 @dataclass
-class SevenDModel:
-    """7D extended cosmology model with deviation parameters."""
+class CWFModel:
+    """CWF extended cosmology model with deviation parameters."""
 
-    name: str = "7D"
+    name: str = "CWF"
     param_names: tuple[str, ...] = ("h", "Om", "x0", "x1")
     bounds: tuple[tuple[float, float], ...] = (
         (0.55, 0.85),
@@ -34,7 +34,7 @@ class SevenDModel:
         return self.s_max * expit(x0 + x1 * (1 - a))
 
     def E(self, z: float, params: Sequence[float]):
-        """Modified Hubble parameter for 7D model."""
+        """Modified Hubble parameter for the CWF model."""
         h, Om, x0, x1 = params
         Or = omega_radiation_fraction(h)
         OL = 1.0 - Om - Or

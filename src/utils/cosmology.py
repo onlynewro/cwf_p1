@@ -1,13 +1,22 @@
-"""Common cosmology constants and helper functions."""
+"""Common cosmology constants and helper functions.
+
+This module centralises the physical constants used throughout the analysis so
+that downstream JSON artefacts remain reproducible even if upstream defaults
+change.  The ``COSMO_CONSTANTS_VERSION`` flag should be bumped whenever any of
+the numerical values below are updated.
+"""
 from __future__ import annotations
 
 import numpy as np
 from scipy.integrate import quad
 
-C_LIGHT = 299792.458  # km/s
-T_CMB = 2.7255  # K
+COSMO_CONSTANTS_VERSION = "2024-05-planck2018"
+C_LIGHT = 299792.458  # km/s, IAU 2015 resolution B2
+DEFAULT_RD_MPC = 147.0  # Mpc, DESI DR2 fiducial sound horizon
+T_CMB = 2.7255  # K, COBE/FIRAS with Planck 2018 convention
 # Ω_γ h^2 for the CMB temperature above (Planck 2018 conventions)
 OMEGA_GAMMA_H2 = 2.469e-5 * (T_CMB / 2.7255) ** 4
+OMEGA_RADIATION_NEUTRINO_FACTOR = 0.22710731766  # Hu & Sugiyama 1996 form
 N_EFF = 3.046
 
 
@@ -15,7 +24,7 @@ def omega_radiation_fraction(h: float) -> float:
     """Return Ω_r for a given reduced Hubble constant h."""
     if h <= 0:
         return 0.0
-    omega_r = OMEGA_GAMMA_H2 * (1.0 + 0.22710731766 * N_EFF)
+    omega_r = OMEGA_GAMMA_H2 * (1.0 + OMEGA_RADIATION_NEUTRINO_FACTOR * N_EFF)
     return omega_r / (h ** 2)
 
 

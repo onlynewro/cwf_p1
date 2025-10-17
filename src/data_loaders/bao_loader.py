@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
-from src.utils.cosmology import C_LIGHT, comoving_distance
+from src.utils.cosmology import C_LIGHT, DEFAULT_RD_MPC, comoving_distance
 from src.utils.validation import ConfigValidationError, require_existing_file
 
 
@@ -19,6 +19,7 @@ class BAOData:
     def __init__(self, filename=None, use_official_covariance=None, include_proxy=None, config=None):
         self.config = config or {}
         self._config_base = Path(self.config.get('base_dir', '.'))
+        self.last_chi2 = None
 
         if use_official_covariance is None:
             use_official_covariance = self.config.get('use_official_covariance', True)
@@ -382,7 +383,7 @@ class BAOData:
 
         return obs_vec, theory_vec, np.diag(variances)
 
-    def chi2(self, model, params, rd_value=147.0):
+    def chi2(self, model, params, rd_value=DEFAULT_RD_MPC):
         """Calculate chi-squared for BAO data including covariance if available."""
         chi2_total = 0.0
         self._covariance_used_last = False
@@ -407,6 +408,7 @@ class BAOData:
 
             chi2_total += float(diff.T @ solved)
 
+        self.last_chi2 = chi2_total
         return chi2_total
 
     def covariance_entry_count(self):
@@ -445,7 +447,7 @@ class BAOData:
                 count += 1
         return count
 
-    def print_residual_table(self, model, params, rd_value=147.0, title=None, *, return_dataframe=False):
+    def print_residual_table(self, model, params, rd_value=DEFAULT_RD_MPC, title=None, *, return_dataframe=False):
         """Print a table comparing observations and theory for BAO data."""
         rows = []
         max_abs_pull = 0.0

@@ -37,6 +37,7 @@ class SNData:
         self._column_map = {'z': None, 'mu': None, 'sigma': None}
         self._cov_source = None
         self._cov_rank = 0
+        self.last_chi2 = None
         data_file = filename or self.config.get('file')
         if data_file:
             resolved = require_existing_file(
@@ -316,6 +317,7 @@ class SNData:
 
     def chi2(self, model, params):
         if self.z.size == 0:
+            self.last_chi2 = 0.0
             return 0.0
 
         mu_theory = np.array([
@@ -324,12 +326,15 @@ class SNData:
         ], dtype=float)
 
         if np.any(~np.isfinite(mu_theory)):
+            self.last_chi2 = np.inf
             return np.inf
 
         residual = self.mu_obs - mu_theory
 
         if not self.marginalize_m:
-            return self._chi2_matrix(residual)
+            chi2_value = self._chi2_matrix(residual)
+            self.last_chi2 = chi2_value
+            return chi2_value
 
         if self._cov_factor is not None:
             ones = np.ones_like(self.mu_obs)
@@ -342,17 +347,21 @@ class SNData:
         else:
             variance = self.mu_err ** 2
             if np.any(variance <= 0):
+                self.last_chi2 = np.inf
                 return np.inf
             weights = 1.0 / variance
             alpha = np.sum(weights)
             beta = np.sum(weights * residual)
             M_best = beta / alpha
             self._last_best_M = M_best
-            return float(np.sum(weights * (residual - M_best) ** 2))
+            chi2_value = float(np.sum(weights * (residual - M_best) ** 2))
+            self.last_chi2 = chi2_value
+            return chi2_value
 
         beta = float(ones @ solved_res)
         alpha = float(ones @ solved_ones)
         if alpha <= 0:
+            self.last_chi2 = np.inf
             return np.inf
 
         M_best = beta / alpha
@@ -361,16 +370,23 @@ class SNData:
 
         if self._cov_factor is not None:
             solved = cho_solve(self._cov_factor, adjusted)
-            return float(adjusted.T @ solved)
+            chi2_value = float(adjusted.T @ solved)
+            self.last_chi2 = chi2_value
+            return chi2_value
 
         if self._cov_inv is not None:
             solved = self._cov_inv @ adjusted
-            return float(adjusted.T @ solved)
+            chi2_value = float(adjusted.T @ solved)
+            self.last_chi2 = chi2_value
+            return chi2_value
 
         variance = self.mu_err ** 2
         if np.any(variance <= 0):
+            self.last_chi2 = np.inf
             return np.inf
-        return float(np.sum(adjusted ** 2 / variance))
+        chi2_value = float(np.sum(adjusted ** 2 / variance))
+        self.last_chi2 = chi2_value
+        return chi2_value
 
     def last_best_M(self) -> Optional[float]:
         return self._last_best_M

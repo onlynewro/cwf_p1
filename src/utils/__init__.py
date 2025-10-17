@@ -1,6 +1,10 @@
 """Utility exports for cosmology helpers."""
 from .cosmology import (
     C_LIGHT,
+    COSMO_CONSTANTS_VERSION,
+    DEFAULT_RD_MPC,
+    OMEGA_RADIATION_NEUTRINO_FACTOR,
+    T_CMB,
     angular_diameter_distance,
     comoving_distance,
     hu_sugiyama_z_star,
@@ -11,6 +15,10 @@ from .cosmology import (
 
 __all__ = [
     'C_LIGHT',
+    'COSMO_CONSTANTS_VERSION',
+    'DEFAULT_RD_MPC',
+    'OMEGA_RADIATION_NEUTRINO_FACTOR',
+    'T_CMB',
     'angular_diameter_distance',
     'comoving_distance',
     'hu_sugiyama_z_star',

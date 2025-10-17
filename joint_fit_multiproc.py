@@ -14,6 +14,7 @@ import numpy as np
 
 from src.utils.cosmology import (
     C_LIGHT,
+    DEFAULT_RD_MPC,
     angular_diameter_distance,
     comoving_distance,
     hu_sugiyama_z_star,
@@ -45,9 +46,20 @@ if sys.platform == "darwin":  # macOS
 
 # ==================== 최적화 함수 ====================
 
-def total_chi2(params, datasets, model, rd_mode='fixed'):
-    """Calculate total chi-squared for all datasets"""
+def total_chi2(params, datasets, model, rd_mode='fixed', return_components=False):
+    """Calculate total chi-squared for all datasets.
+
+    When ``return_components`` is ``True`` a tuple ``(total, components)`` is
+    returned where *components* maps dataset names to their individual χ²
+    contributions. Missing datasets are reported with ``None``.
+    """
     chi2_total = 0.0
+    chi2_components = {
+        'bao': None,
+        'sn': None,
+        'cmb': None,
+        'regularization': None,
+    }
 
     def _as_positive_chi2(value):
         if value is None:
@@ -69,7 +81,7 @@ def total_chi2(params, datasets, model, rd_mode='fixed'):
 
     # BAO contribution
     if 'bao' in datasets and datasets['bao'] is not None:
-        rd_value = 147.0
+        rd_value = DEFAULT_RD_MPC
         if rd_mode == 'fit' and getattr(model, 'param_names', None):
             if model.param_names[-1] == 'rd':
                 rd_value = params[-1]
@@ -77,26 +89,36 @@ def total_chi2(params, datasets, model, rd_mode='fixed'):
         chi2_bao = datasets['bao'].chi2(model, params, rd_value)
         chi2_bao = _as_positive_chi2(chi2_bao)
         chi2_total += chi2_bao
+        chi2_components['bao'] = chi2_bao
+        if hasattr(datasets['bao'], 'last_chi2'):
+            datasets['bao'].last_chi2 = chi2_bao
 
     # SN contribution
     if 'sn' in datasets and datasets['sn'] is not None:
         chi2_sn = datasets['sn'].chi2(model, params)
         chi2_sn = _as_positive_chi2(chi2_sn)
         chi2_total += chi2_sn
+        chi2_components['sn'] = chi2_sn
+        if hasattr(datasets['sn'], 'last_chi2'):
+            datasets['sn'].last_chi2 = chi2_sn
 
     # CMB contribution
     if 'cmb' in datasets and datasets['cmb'] is not None:
         chi2_cmb = datasets['cmb'].chi2(model, params)
         chi2_cmb = _as_positive_chi2(chi2_cmb)
+        chi2_total += chi2_cmb
+        chi2_components['cmb'] = chi2_cmb
         if hasattr(datasets['cmb'], 'last_chi2'):
             datasets['cmb'].last_chi2 = chi2_cmb
-        chi2_total += chi2_cmb
 
     regularization = 0.0
     if hasattr(model, 'regularization'):
         regularization = model.regularization(params, datasets)
     chi2_total += regularization
+    chi2_components['regularization'] = regularization
 
+    if return_components:
+        return chi2_total, chi2_components
     return chi2_total
 
 def _finite_float_or_none(value):

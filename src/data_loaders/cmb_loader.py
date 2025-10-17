@@ -77,6 +77,7 @@ class CMBData:
         """Calculate chi-squared for CMB data."""
         theory = self._theory_vector(model, params)
         if theory is None or not np.all(np.isfinite(theory)):
+            self.last_chi2 = np.inf
             return np.inf
         self.last_theory = theory
         diff = theory - self.mean
