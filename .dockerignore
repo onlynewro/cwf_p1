@@ -1,0 +1,11 @@
+# Ignore typical Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+
+# Ensure environment specifications are sent to the build context
+!requirements.txt
+!environment.yml
