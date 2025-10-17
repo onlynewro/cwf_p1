@@ -13,6 +13,7 @@ import json
 import sys
 import os
 import copy
+from pathlib import Path
 from functools import partial
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -22,7 +23,53 @@ from scipy.interpolate import interp1d
 from scipy.special import expit
 from scipy.linalg import cho_factor, cho_solve
 import warnings
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - handled at runtime
+    yaml = None
+
 warnings.filterwarnings('ignore')
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "default_config.yaml"
+
+
+def _resolve_with_base(path, base_dir):
+    """Return an absolute path resolved against ``base_dir`` when ``path`` is relative."""
+    if path is None:
+        return None
+    path_obj = Path(path)
+    if path_obj.is_absolute():
+        return str(path_obj)
+    if base_dir is None:
+        return str(path_obj)
+    return str((Path(base_dir) / path_obj).resolve())
+
+
+def load_configuration(config_path=None):
+    """Load the YAML configuration file and attach metadata about its location."""
+    selected_path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
+    selected_path = selected_path.resolve()
+
+    if not selected_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {selected_path}")
+
+    if yaml is None:
+        raise ImportError("PyYAML is required to load configuration files. Please install it to continue.")
+
+    with selected_path.open('r', encoding='utf-8') as handle:
+        data = yaml.safe_load(handle) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration root must be a mapping, received {type(data).__name__}")
+
+    metadata = {
+        'path': str(selected_path),
+        'base_dir': str(selected_path.parent),
+    }
+    data.setdefault('_metadata', {}).update(metadata)
+    return data
 
 
 class CovarianceComputationError(RuntimeError):
@@ -317,30 +364,17 @@ class RDFitWrapper:
 class BAOData:
     """BAO data handler"""
 
-    OFFICIAL_DATASETS = [
-        {
-            'name': 'DESI LRG GCcomb z=0.4-0.6',
-            'mean_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_cov.txt'
-        },
-        {
-            'name': 'DESI LRG GCcomb z=0.6-0.8',
-            'mean_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_cov.txt'
-        },
-        {
-            'name': 'DESI Lyα GCcomb',
-            'mean_file': 'desi_2024_gaussian_bao_Lya_GCcomb_mean.txt',
-            'cov_file': 'desi_2024_gaussian_bao_Lya_GCcomb_cov.txt'
-        }
-    ]
+    OFFICIAL_DATASETS = []  # Deprecated in favour of configuration driven catalogues.
 
-    def __init__(self, filename=None, use_official_covariance=True, include_proxy=True):
+    def __init__(self, filename=None, use_official_covariance=True, include_proxy=True,
+                 catalogue=None, base_dir=None):
         self.data = []
         self._base_data = []
         self._covariance_used_last = False
         self._default_use_covariance = use_official_covariance
         self._include_proxy = include_proxy
+        self._catalogue_specs = copy.deepcopy(catalogue) if catalogue else []
+        self._base_dir = base_dir
         if filename and os.path.exists(filename):
             self.load_from_file(filename)
         else:
@@ -351,7 +385,12 @@ class BAOData:
         """Load official DESI BAO data with optional covariance usage."""
         try:
             entries = []
-            for spec in self.OFFICIAL_DATASETS:
+            catalogue_specs = [spec for spec in (self._catalogue_specs or self.OFFICIAL_DATASETS)
+                               if spec.get('enabled', True)]
+            if not catalogue_specs:
+                raise ValueError("No BAO catalogue entries provided in configuration")
+
+            for spec in catalogue_specs:
                 entry = self._load_official_entry(spec, use_official_covariance)
                 entries.append(entry)
 
@@ -368,8 +407,9 @@ class BAOData:
 
             self.data = entries
             self._base_data = copy.deepcopy(self.data)
-        except FileNotFoundError:
-            # Fallback to legacy static table if official files are unavailable.
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Warning: Failed to load configured BAO catalogue ({exc}). Using legacy fallback table.")
+            # Fallback to legacy static table if official files are unavailable or configuration is empty.
             default_entries = [
                 {'name': 'LRG_0.6', 'z': 0.51, 'DM_over_rd': 13.62, 'err_DM': 0.25,
                  'DH_over_rd': None, 'err_DH': None},
@@ -396,8 +436,14 @@ class BAOData:
             self.load_default(use_official_covariance=self._default_use_covariance)
 
     def _load_official_entry(self, spec, use_official_covariance):
-        mean_path = spec['mean_file']
-        cov_path = spec.get('cov_file')
+        mean_key = spec.get('mean_file') or spec.get('mean')
+        cov_key = spec.get('cov_file') or spec.get('cov')
+
+        if mean_key is None:
+            raise ValueError(f"BAO catalogue entry '{spec.get('name', 'Unnamed')}' lacks a mean file path")
+
+        mean_path = _resolve_with_base(mean_key, self._base_dir)
+        cov_path = _resolve_with_base(cov_key, self._base_dir) if cov_key else None
 
         if not os.path.exists(mean_path):
             raise FileNotFoundError(mean_path)
@@ -1475,6 +1521,8 @@ def calculate_statistics(chi2, n_data, n_params):
 
 def main():
     parser = argparse.ArgumentParser(description='7D Cosmology Joint Fitting')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to a YAML configuration file (defaults to config/default_config.yaml)')
     parser.add_argument('--model', choices=['LCDM', '7D', 'both'], default='both',
                         help='Model to fit')
     parser.add_argument('--bao-file', type=str, default=None,
@@ -1501,31 +1549,49 @@ def main():
                         help='Maximum iterations for optimization')
     parser.add_argument('--output', type=str, default='fit_results.json',
                         help='Output file for results')
-    
+
     args = parser.parse_args()
-    
+
+    config = load_configuration(args.config)
+    config_meta = config.get('_metadata', {})
+    config_dir = config_meta.get('base_dir')
+    config_path = config_meta.get('path')
+
+    print(f"Configuration: {config_path}")
+
     # Set number of workers
     if args.workers == -1:
         args.workers = mp.cpu_count()
-    
+
     print(f"=== 7D Cosmology Joint Fitting ===")
     print(f"Using {args.workers} workers for parallel computation")
     
     # Load datasets
     print("\nLoading datasets...")
-    datasets = {'bao': None, 'sn': None, 'cmb': None}
+    datasets = {'bao': None, 'sn': None, 'cmb': None, 'config': config}
 
     # BAO data
-    use_covariance = not args.disable_bao_cov
-    bao_requested = bool(args.bao_file) or args.use_default_bao
+    bao_cfg = config.get('bao', {}) if isinstance(config.get('bao', {}), dict) else {}
+    bao_file = args.bao_file or bao_cfg.get('file')
+    if bao_file:
+        bao_file = _resolve_with_base(bao_file, config_dir)
+
+    use_covariance = bao_cfg.get('use_covariance', True) and not args.disable_bao_cov
+    include_proxy = bao_cfg.get('include_proxy', True) and not args.no_proxy
+    diagnose_lya = args.diagnose_lya_dh or bao_cfg.get('diagnose_lya_dh', False)
+    drop_lya = args.drop_lya_dh or bao_cfg.get('drop_lya_dh', False)
+
+    bao_requested = bool(bao_file) or bao_cfg.get('enabled', False) or args.use_default_bao
     if bao_requested:
-        bao_source = args.bao_file if args.bao_file else 'default DESI catalogue'
+        bao_source = bao_file if bao_file else f"configuration catalogue ({config_path})"
         bao_data = BAOData(
-            args.bao_file if args.bao_file else None,
+            bao_file if bao_file else None,
             use_official_covariance=use_covariance,
-            include_proxy=not args.no_proxy
+            include_proxy=include_proxy,
+            catalogue=bao_cfg.get('catalogue', []),
+            base_dir=config_dir
         )
-        if args.disable_bao_cov:
+        if not use_covariance:
             bao_data.remove_all_covariances()
         datasets['bao'] = bao_data
         print(f"  BAO: {bao_data.count_observables()} observables from {len(bao_data.data)} entries loaded")
@@ -1534,12 +1600,19 @@ def main():
         if cov_entries:
             print(f"      covariance provided for {cov_entries} BAO entries")
     else:
-        print("  BAO: skipped (no file provided)")
+        print("  BAO: skipped (disabled by configuration and no file provided)")
 
     # SN data
-    if args.sn_file:
+    sn_cfg = config.get('sn', {}) if isinstance(config.get('sn', {}), dict) else {}
+    sn_file = args.sn_file or sn_cfg.get('file')
+    if sn_file:
+        sn_file = _resolve_with_base(sn_file, config_dir)
+
+    sn_marginalize = sn_cfg.get('marginalize_m', True)
+    sn_requested = bool(sn_file) or sn_cfg.get('enabled', False)
+    if sn_requested and sn_file:
         try:
-            sn_data = SNData(args.sn_file)
+            sn_data = SNData(sn_file, marginalize_m=sn_marginalize)
             datasets['sn'] = sn_data
             sn_summary = sn_data.summary()
             print(f"  SN: {sn_summary['count']} points loaded (cov rank = {sn_summary['cov_rank']})")
@@ -1554,11 +1627,15 @@ def main():
         except Exception as exc:
             print(f"  Warning: failed to load SN data ({exc})")
             datasets['sn'] = None
+    elif sn_requested and not sn_file:
+        print("  Warning: SN dataset enabled in configuration but no file path was provided")
     else:
         datasets['sn'] = None
-    
+
     # CMB data
-    if args.use_cmb:
+    cmb_cfg = config.get('cmb', {}) if isinstance(config.get('cmb', {}), dict) else {}
+    use_cmb = args.use_cmb or cmb_cfg.get('enabled', False)
+    if use_cmb:
         cmb_data = CMBData()
         datasets['cmb'] = cmb_data
         print("  CMB: constraints loaded")
@@ -1588,7 +1665,7 @@ def main():
         if max_frac <= 0.01:
             print("  All fiducial predictions agree within 1% of observations")
 
-        if args.diagnose_lya_dh:
+        if diagnose_lya:
             diagnostic_flag = False
             with datasets['bao'].temporarily_drop('DESI Lyα GCcomb', 'DH_over_rd') as dropped:
                 diagnostic_flag = dropped
@@ -1604,7 +1681,7 @@ def main():
             if diagnostic_flag:
                 print("  Lyα DH/rd observable restored for covariance-weighted fitting.")
 
-    if args.drop_lya_dh:
+    if drop_lya:
         if datasets['bao'] is not None:
             dropped_final = datasets['bao'].drop_observable('DESI Lyα GCcomb', 'DH_over_rd')
             if dropped_final:

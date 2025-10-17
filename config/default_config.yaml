@@ -1,0 +1,24 @@
+# Default configuration for joint_fit_multiproc.py
+# Paths are resolved relative to this file.
+bao:
+  enabled: true
+  use_covariance: true
+  include_proxy: true
+  drop_lya_dh: false
+  diagnose_lya_dh: false
+  catalogue:
+    - name: DESI LRG GCcomb z=0.4-0.6
+      mean_file: ../desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_mean.txt
+      cov_file: ../desi_2024_gaussian_bao_LRG_GCcomb_z0.4-0.6_cov.txt
+    - name: DESI LRG GCcomb z=0.6-0.8
+      mean_file: ../desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_mean.txt
+      cov_file: ../desi_2024_gaussian_bao_LRG_GCcomb_z0.6-0.8_cov.txt
+    - name: DESI Lyα GCcomb
+      mean_file: ../desi_2024_gaussian_bao_Lya_GCcomb_mean.txt
+      cov_file: ../desi_2024_gaussian_bao_Lya_GCcomb_cov.txt
+sn:
+  enabled: false
+  file: ../Pantheon+SH0ES.dat
+  marginalize_m: true
+cmb:
+  enabled: false
