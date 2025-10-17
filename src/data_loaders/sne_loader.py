@@ -216,12 +216,33 @@ class SNData:
             )
             mu_series, mu_col = self._extract_column(
                 df_candidate,
-                ['mu', 'm-m', 'distance_modulus', 'modulus', 'm_B'],
+                [
+                    'mu',
+                    'm-m',
+                    'distance_modulus',
+                    'modulus',
+                    'mu_sh0es',
+                    'm_b_corr',
+                    'mB',
+                    'm_B',
+                ],
                 lookup,
             )
             err_series, err_col = self._extract_column(
                 df_candidate,
-                ['sigma', 'mu_err', 'm_err', 'sig', 'err', 'mu_sigma'],
+                [
+                    'sigma',
+                    'mu_err',
+                    'm_err',
+                    'sig',
+                    'err',
+                    'mu_sigma',
+                    'mu_sh0es_err',
+                    'mu_sh0es_err_diag',
+                    'm_b_corr_err_diag',
+                    'mB_err',
+                    'm_B_err',
+                ],
                 lookup,
             )
 
