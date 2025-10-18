@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -122,8 +122,8 @@ def run_beta_stability(
         bin_centers, bin_indices = np.unique(z, return_inverse=True)
 
     bin_results: List[BetaBinResult] = []
-    slopes: List[float] = []
     bin_labels: List[str] = []
+    bin_ranges: List[Tuple[float, float]] = []
 
     for idx in range(len(bin_centers)):
         mask = bin_indices == idx
@@ -140,7 +140,12 @@ def run_beta_stability(
         approximation = best_rational_approximation(ratio, max_denominator, approximation_tolerance)
         label = _format_bin_label(idx, bin_centers, edges=edges)
         bin_labels.append(label)
-        slopes.append(beta1)
+        if edges is not None and idx < len(edges) - 1:
+            z_min, z_max = edges[idx], edges[idx + 1]
+        else:
+            center = bin_centers[idx]
+            z_min = z_max = center
+        bin_ranges.append((float(z_min), float(z_max)))
         bin_results.append(
             BetaBinResult(
                 bin_label=label,
@@ -164,31 +169,36 @@ def run_beta_stability(
         sum(result.beta1_uncertainty ** 2 for result in bin_results)
     )
 
+    slopes = [result.beta1 for result in bin_results]
+    slope_uncertainties = [result.beta1_uncertainty for result in bin_results]
+    x_positions = np.arange(1, len(bin_results) + 1)
+
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.errorbar(
-        np.arange(len(slopes)),
-        slopes,
-        yerr=[result.beta1_uncertainty for result in bin_results],
-        fmt="o",
-        label="β₁",
-    )
-    for result in bin_results:
+    ax.errorbar(x_positions, slopes, yerr=slope_uncertainties, fmt="o", label="β₁")
+    for idx, result in enumerate(bin_results):
         if result.approximation is None:
             continue
-        idx = bin_labels.index(result.bin_label)
         ax.annotate(
             result.approximation.as_string(),
-            (idx, result.beta1),
+            (x_positions[idx], result.beta1),
             textcoords="offset points",
             xytext=(0, 10),
             ha="center",
             fontsize=8,
         )
-    ax.set_xticks(np.arange(len(bin_labels)))
-    ax.set_xticklabels(bin_labels, rotation=45, ha="right")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([str(i) for i in x_positions])
+    ax.set_xlabel("Bin index")
     ax.set_ylabel("β₁")
     ax.set_title("β stability across redshift bins")
     ax.grid(True, alpha=0.3)
+
+    top_axis = ax.secondary_xaxis("top")
+    top_axis.set_xticks(x_positions)
+    top_axis.set_xticklabels([f"[{z_min:.3g}, {z_max:.3g}]" for z_min, z_max in bin_ranges])
+    top_axis.tick_params(axis="x", rotation=45)
+    top_axis.set_xlabel("Redshift range")
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
