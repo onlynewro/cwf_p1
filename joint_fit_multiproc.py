@@ -438,13 +438,16 @@ class BAOData:
         if entry['DH_over_rd'] is not None:
             target_order.append('DH_over_rd')
 
+        perm = []
+        if target_order:
+            perm = [raw_order.index(q) for q in target_order]
+
         if use_official_covariance and cov_path and os.path.exists(cov_path):
             cov = np.loadtxt(cov_path)
             cov = np.array(cov, dtype=float)
             if cov.ndim == 0:
                 cov = cov.reshape(1, 1)
 
-            perm = [raw_order.index(q) for q in target_order]
             cov = cov[np.ix_(perm, perm)]
 
             if cov.shape[0] != len(target_order):
@@ -473,6 +476,9 @@ class BAOData:
                 diag_vals = None
 
             if diag_vals is not None and diag_vals.size >= len(target_order):
+                if perm:
+                    diag_vals = diag_vals[np.array(perm, dtype=int)]
+
                 for idx, key in enumerate(target_order):
                     err = float(np.sqrt(diag_vals[idx]))
                     if key == 'DM_over_rd':
@@ -1488,7 +1494,7 @@ def main():
     parser.add_argument('--rd-mode', choices=['fixed', 'fit'], default='fixed',
                         help='Sound horizon mode')
     parser.add_argument('--disable-bao-cov', action='store_true',
-                        help='Ignore supplied BAO covariance matrices')
+                        help='Ignore supplied BAO covariance matrices while keeping 1σ errors from their diagonals')
     parser.add_argument('--no-proxy', action='store_true',
                         help='Omit the legacy QSO proxy point from the default BAO catalogue')
     parser.add_argument('--drop-lya-dh', action='store_true',
