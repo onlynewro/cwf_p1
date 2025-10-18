@@ -11,7 +11,7 @@ from pandas.api.types import is_categorical_dtype
 from scipy.linalg import cho_factor, cho_solve
 
 from src.utils.cosmology import luminosity_distance
-from src.utils.validation import require_existing_file
+from src.utils.validation import ConfigValidationError, require_existing_file
 
 
 class SNData:
@@ -276,6 +276,11 @@ class SNData:
         mu_values = mu_values[mask]
         mu_err_values = mu_err_values[mask]
 
+        if np.any(~np.isfinite(mu_err_values)):
+            raise ConfigValidationError(
+                "SN data catalogue contains non-finite distance modulus uncertainties"
+            )
+
         self.z = z_values
         self.mu_obs = mu_values
         self.mu_err = mu_err_values
@@ -310,6 +315,8 @@ class SNData:
             return float(residual.T @ solved)
 
         variance = self.mu_err ** 2
+        if np.any(~np.isfinite(variance)):
+            return np.inf
         if np.any(variance <= 0):
             return np.inf
         return float(np.sum(residual ** 2 / variance))
@@ -341,9 +348,13 @@ class SNData:
             solved_ones = self._cov_inv_ones
         else:
             variance = self.mu_err ** 2
+            if np.any(~np.isfinite(variance)):
+                return np.inf
             if np.any(variance <= 0):
                 return np.inf
             weights = 1.0 / variance
+            if np.any(~np.isfinite(weights)):
+                return np.inf
             alpha = np.sum(weights)
             beta = np.sum(weights * residual)
             M_best = beta / alpha
@@ -368,6 +379,8 @@ class SNData:
             return float(adjusted.T @ solved)
 
         variance = self.mu_err ** 2
+        if np.any(~np.isfinite(variance)):
+            return np.inf
         if np.any(variance <= 0):
             return np.inf
         return float(np.sum(adjusted ** 2 / variance))
