@@ -5,7 +5,6 @@ import argparse
 import copy
 import json
 import logging
-import multiprocessing as mp
 import sys
 from functools import partial
 from pathlib import Path
@@ -28,6 +27,7 @@ from src.data_loaders.sne_loader import SNData
 from src.models.lcdm import LCDMModel
 from src.models.rd_fit_wrapper import RDFitWrapper
 from src.models.seven_d import SevenDModel
+from src.utils.command_set import CommandSet
 from src.utils.logging_config import (
     StructuredLogger,
     build_run_metadata,
@@ -259,604 +259,655 @@ def main():
     datasets = {'bao': None, 'sn': None, 'cmb': None}
     dataset_summary: Dict[str, object] = {}
     checksum_entries: Dict[str, str] = {}
+    results: Dict[str, Dict[str, object]] = {}
 
-    if config_data.get('config_path'):
-        config_checksum = compute_sha256(Path(config_data['config_path']))
-        if config_checksum:
-            checksum_entries['config'] = config_checksum
+    command_set = CommandSet('pipeline', logger=run_logger)
 
-    bao_requested = bool(
-        args.bao_file
-        or args.use_default_bao
-        or bao_config.get('data_file')
-        or bao_config.get('datasets')
-    )
-    bao_source = None
-    if bao_requested:
-        bao_source = args.bao_file or bao_config.get('data_file') or 'configuration datasets'
-        try:
-            bao_data = BAOData(
-                args.bao_file if args.bao_file else None,
-                use_official_covariance=use_covariance,
-                include_proxy=include_proxy,
-                config=bao_config,
-            )
-        except ConfigValidationError as exc:
-            _log_dataset_summary(
-                run_logger,
-                'bao.error',
-                f"BAO: configuration error ({exc})",
-                {'error': str(exc)},
-                level=logging.ERROR,
-            )
-            dataset_summary['bao'] = {'loaded': False, 'error': str(exc)}
-            datasets['bao'] = None
-        except Exception as exc:  # pylint: disable=broad-except
-            _log_dataset_summary(
-                run_logger,
-                'bao.load_failed',
-                f"BAO: failed to load ({exc})",
-                {'error': str(exc)},
-                level=logging.ERROR,
-            )
-            dataset_summary['bao'] = {'loaded': False, 'error': str(exc)}
-            datasets['bao'] = None
+    def load_datasets_command():
+        nonlocal datasets, dataset_summary, checksum_entries
+
+        run_logger.log_event(
+            'data_load.start',
+            {
+                'bao_requested': bool(
+                    args.bao_file
+                    or args.use_default_bao
+                    or bao_config.get('data_file')
+                    or bao_config.get('datasets')
+                ),
+                'sn_requested': bool(args.sn_file or sn_config.get('file')),
+                'use_cmb': bool(args.use_cmb),
+            },
+            message='Loading datasets...'
+        )
+
+        dataset_summary = {'bao': {'loaded': False}, 'sn': {'loaded': False}, 'cmb': {'loaded': False}}
+        datasets = {'bao': None, 'sn': None, 'cmb': None}
+
+        if config_data.get('config_path'):
+            config_checksum = compute_sha256(Path(config_data['config_path']))
+            if config_checksum:
+                checksum_entries['config'] = config_checksum
+
+        bao_requested = bool(
+            args.bao_file
+            or args.use_default_bao
+            or bao_config.get('data_file')
+            or bao_config.get('datasets')
+        )
+        bao_source = None
+        if bao_requested:
+            bao_source = args.bao_file or bao_config.get('data_file') or 'configuration datasets'
+            try:
+                bao_data = BAOData(
+                    args.bao_file if args.bao_file else None,
+                    use_official_covariance=use_covariance,
+                    include_proxy=include_proxy,
+                    config=bao_config,
+                )
+            except ConfigValidationError as exc:
+                _log_dataset_summary(
+                    run_logger,
+                    'bao.error',
+                    f"BAO: configuration error ({exc})",
+                    {'error': str(exc)},
+                    level=logging.ERROR,
+                )
+                dataset_summary['bao'] = {'loaded': False, 'error': str(exc)}
+                datasets['bao'] = None
+            except Exception as exc:  # pylint: disable=broad-except
+                _log_dataset_summary(
+                    run_logger,
+                    'bao.load_failed',
+                    f"BAO: failed to load ({exc})",
+                    {'error': str(exc)},
+                    level=logging.ERROR,
+                )
+                dataset_summary['bao'] = {'loaded': False, 'error': str(exc)}
+                datasets['bao'] = None
+            else:
+                if args.disable_bao_cov:
+                    bao_data.remove_all_covariances()
+                datasets['bao'] = bao_data
+                payload = _summarize_bao(bao_data, bao_source, use_covariance, include_proxy)
+                _log_dataset_summary(
+                    run_logger,
+                    'bao.success',
+                    f"BAO: {payload['observables']} observables from {payload['entry_count']} entries loaded",
+                    payload,
+                )
+                dataset_summary['bao'] = payload
+                for idx, file_path in enumerate(bao_data.source_files):
+                    digest = compute_sha256(Path(file_path))
+                    if digest:
+                        checksum_entries[f'bao_source_{idx}'] = digest
         else:
-            if args.disable_bao_cov:
-                bao_data.remove_all_covariances()
-            datasets['bao'] = bao_data
-            payload = _summarize_bao(bao_data, bao_source, use_covariance, include_proxy)
             _log_dataset_summary(
                 run_logger,
-                'bao.success',
-                f"BAO: {payload['observables']} observables from {payload['entry_count']} entries loaded",
-                payload,
+                'bao.skipped',
+                'BAO: skipped (no configuration or file provided)',
+                {},
             )
-            dataset_summary['bao'] = payload
-            for idx, file_path in enumerate(bao_data.source_files):
-                digest = compute_sha256(Path(file_path))
-                if digest:
-                    checksum_entries[f'bao_source_{idx}'] = digest
-    else:
-        _log_dataset_summary(
-            run_logger,
-            'bao.skipped',
-            'BAO: skipped (no configuration or file provided)',
-            {},
-        )
-        dataset_summary['bao'] = {'loaded': False, 'reason': 'not requested'}
+            dataset_summary['bao'] = {'loaded': False, 'reason': 'not requested'}
 
-    sn_file = args.sn_file if args.sn_file else sn_config.get('file')
-    sn_marginalize = sn_config.get('marginalize_m', True)
-    if sn_file:
-        try:
-            sn_data = SNData(sn_file, marginalize_m=sn_marginalize, config=sn_config)
-            datasets['sn'] = sn_data
-            sn_summary = sn_data.summary()
-            sn_summary['loaded'] = True
-            dataset_summary['sn'] = sn_summary
-            message = (
-                f"SN: {sn_summary['count']} points loaded (cov rank = {sn_summary['cov_rank']})"
-            )
-            details = {
-                'file': sn_summary['file'],
-                'columns': sn_summary['columns'],
-                'covariance_source': sn_summary['cov_source'],
-            }
-            _log_dataset_summary(run_logger, 'sn.success', message, details)
-            if sn_summary['file']:
-                digest = compute_sha256(Path(sn_summary['file']))
-                if digest:
-                    checksum_entries['sn'] = digest
-            if sn_summary['cov_source']:
-                digest = compute_sha256(Path(sn_summary['cov_source']))
-                if digest:
-                    checksum_entries['sn_covariance'] = digest
-        except ConfigValidationError as exc:
-            _log_dataset_summary(
-                run_logger,
-                'sn.config_error',
-                f"SN configuration error ({exc})",
-                {'error': str(exc)},
-                level=logging.WARNING,
-            )
-            dataset_summary['sn'] = {'loaded': False, 'error': str(exc)}
-            datasets['sn'] = None
-        except Exception as exc:  # pylint: disable=broad-except
-            _log_dataset_summary(
-                run_logger,
-                'sn.load_failed',
-                f"SN data load failed ({exc})",
-                {'error': str(exc)},
-                level=logging.WARNING,
-            )
-            dataset_summary['sn'] = {'loaded': False, 'error': str(exc)}
-            datasets['sn'] = None
-    else:
-        dataset_summary['sn'] = {'loaded': False, 'reason': 'not requested'}
-
-    if args.use_cmb:
-        datasets['cmb'] = CMBData(config=cmb_config)
-        dataset_summary['cmb'] = {
-            'loaded': True,
-            'observables': datasets['cmb'].count_observables(),
-        }
-        _log_dataset_summary(
-            run_logger,
-            'cmb.success',
-            'CMB: constraints loaded',
-            dataset_summary['cmb'],
-        )
-    else:
-        datasets['cmb'] = None
-        dataset_summary['cmb'] = {'loaded': False, 'observables': 0, 'enabled': False}
-        _log_dataset_summary(
-            run_logger,
-            'cmb.skipped',
-            'CMB: constraints not included',
-            dataset_summary['cmb'],
-        )
-
-    if datasets['bao'] is not None and datasets['bao'].count_observables() > 0:
-        fid_lcdm = LCDMModel()
-        fid_params = [0.67, 0.31]
-        run_logger.log_event(
-            'bao_fiducial_check.start',
-            {'model': 'LCDM', 'params': fid_params},
-            message='Running fiducial BAO sanity check (LCDM: h=0.67, Ωm=0.31).'
-        )
-        fid_df, fid_max_pull = datasets['bao'].print_residual_table(
-            fid_lcdm,
-            fid_params,
-            rd_value=147.0,
-            return_dataframe=True,
-        )
-        if save_intermediate and fid_df is not None:
-            path = run_logger.save_dataframe('diagnostics/fiducial_bao_residuals.csv', fid_df)
-            if path:
-                run_logger.log_event(
-                    'artifact_saved',
-                    {'path': str(path)},
-                    message=f'Saved fiducial BAO residuals to {path.name}'
+        sn_file = args.sn_file if args.sn_file else sn_config.get('file')
+        sn_marginalize = sn_config.get('marginalize_m', True)
+        if sn_file:
+            try:
+                sn_data = SNData(sn_file, marginalize_m=sn_marginalize, config=sn_config)
+                datasets['sn'] = sn_data
+                sn_summary = sn_data.summary()
+                sn_summary['loaded'] = True
+                dataset_summary['sn'] = sn_summary
+                message = (
+                    f"SN: {sn_summary['count']} points loaded (cov rank = {sn_summary['cov_rank']})"
                 )
-        run_logger.log_event(
-            'bao_fiducial_check.complete',
-            {'max_abs_pull': fid_max_pull},
-            message=f'Fiducial maximum |pull| = {fid_max_pull:.3f}'
-        )
-
-        max_frac = 0.0
-        for point in datasets['bao'].data:
-            obs_vec, theory_vec, _ = datasets['bao']._collect_observables(point, fid_lcdm, fid_params, 147.0)
-            if obs_vec is None or obs_vec.size == 0:
-                continue
-            frac_diff = np.abs(obs_vec - theory_vec) / obs_vec
-            if frac_diff.size:
-                max_frac = max(max_frac, float(np.max(frac_diff)))
-            if np.any(frac_diff > 0.01):
-                run_logger.log_event(
-                    'bao_fiducial_check.warning',
-                    {
-                        'entry': point.get('name', 'BAO_point'),
-                        'fractional_difference': frac_diff.tolist(),
-                    },
+                details = {
+                    'file': sn_summary['file'],
+                    'columns': sn_summary['columns'],
+                    'covariance_source': sn_summary['cov_source'],
+                }
+                _log_dataset_summary(run_logger, 'sn.success', message, details)
+                if sn_summary['file']:
+                    digest = compute_sha256(Path(sn_summary['file']))
+                    if digest:
+                        checksum_entries['sn'] = digest
+                if sn_summary['cov_source']:
+                    digest = compute_sha256(Path(sn_summary['cov_source']))
+                    if digest:
+                        checksum_entries['sn_covariance'] = digest
+            except ConfigValidationError as exc:
+                _log_dataset_summary(
+                    run_logger,
+                    'sn.config_error',
+                    f"SN configuration error ({exc})",
+                    {'error': str(exc)},
                     level=logging.WARNING,
-                    message=f"BAO entry {point.get('name', 'BAO_point')} exceeds 1% fractional difference"
                 )
-        if max_frac <= 0.01:
-            run_logger.log_event(
-                'bao_fiducial_check.summary',
-                {'max_fractional_difference': max_frac},
-                message='All fiducial predictions agree within 1% of observations'
+                dataset_summary['sn'] = {'loaded': False, 'error': str(exc)}
+                datasets['sn'] = None
+            except Exception as exc:  # pylint: disable=broad-except
+                _log_dataset_summary(
+                    run_logger,
+                    'sn.load_failed',
+                    f"SN data load failed ({exc})",
+                    {'error': str(exc)},
+                    level=logging.WARNING,
+                )
+                dataset_summary['sn'] = {'loaded': False, 'error': str(exc)}
+                datasets['sn'] = None
+        else:
+            dataset_summary['sn'] = {'loaded': False, 'reason': 'not requested'}
+
+        if args.use_cmb:
+            datasets['cmb'] = CMBData(config=cmb_config)
+            dataset_summary['cmb'] = {
+                'loaded': True,
+                'observables': datasets['cmb'].count_observables(),
+            }
+            _log_dataset_summary(
+                run_logger,
+                'cmb.success',
+                'CMB: constraints loaded',
+                dataset_summary['cmb'],
+            )
+        else:
+            datasets['cmb'] = None
+            dataset_summary['cmb'] = {'loaded': False, 'observables': 0, 'enabled': False}
+            _log_dataset_summary(
+                run_logger,
+                'cmb.skipped',
+                'CMB: constraints not included',
+                dataset_summary['cmb'],
             )
 
-        if args.diagnose_lya_dh:
-            diagnostic_flag = False
-            with datasets['bao'].temporarily_drop('DESI Lyα GCcomb', 'DH_over_rd') as dropped:
-                diagnostic_flag = dropped
-                if dropped:
-                    diag_df, diag_pull = datasets['bao'].print_residual_table(
-                        fid_lcdm,
-                        fid_params,
-                        rd_value=147.0,
-                        title='(Lyα DH/rd temporarily removed)',
+        if datasets['bao'] is not None and datasets['bao'].count_observables() > 0:
+            fid_lcdm = LCDMModel()
+            fid_params = [0.67, 0.31]
+            run_logger.log_event(
+                'bao_fiducial_check.start',
+                {'model': 'LCDM', 'params': fid_params},
+                message='Running fiducial BAO sanity check (LCDM: h=0.67, Ωm=0.31).'
+            )
+            fid_df, fid_max_pull = datasets['bao'].print_residual_table(
+                fid_lcdm,
+                fid_params,
+                rd_value=147.0,
+                return_dataframe=True,
+            )
+            if save_intermediate and fid_df is not None:
+                path = run_logger.save_dataframe('diagnostics/fiducial_bao_residuals.csv', fid_df)
+                if path:
+                    run_logger.log_event(
+                        'artifact_saved',
+                        {'path': str(path)},
+                        message=f'Saved fiducial BAO residuals to {path.name}'
+                    )
+            run_logger.log_event(
+                'bao_fiducial_check.complete',
+                {'max_abs_pull': fid_max_pull},
+                message=f'Fiducial maximum |pull| = {fid_max_pull:.3f}'
+            )
+
+            max_frac = 0.0
+            for point in datasets['bao'].data:
+                obs_vec, theory_vec, _ = datasets['bao']._collect_observables(point, fid_lcdm, fid_params, 147.0)
+                if obs_vec is None or obs_vec.size == 0:
+                    continue
+                frac_diff = np.abs(obs_vec - theory_vec) / obs_vec
+                if frac_diff.size:
+                    max_frac = max(max_frac, float(np.max(frac_diff)))
+                if np.any(frac_diff > 0.01):
+                    run_logger.log_event(
+                        'bao_fiducial_check.warning',
+                        {
+                            'entry': point.get('name', 'BAO_point'),
+                            'fractional_difference': frac_diff.tolist(),
+                        },
+                        level=logging.WARNING,
+                        message=f"BAO entry {point.get('name', 'BAO_point')} exceeds 1% fractional difference"
+                    )
+            if max_frac <= 0.01:
+                run_logger.log_event(
+                    'bao_fiducial_check.summary',
+                    {'max_fractional_difference': max_frac},
+                    message='All fiducial predictions agree within 1% of observations'
+                )
+
+            if args.diagnose_lya_dh:
+                diagnostic_flag = False
+                with datasets['bao'].temporarily_drop('DESI Lyα GCcomb', 'DH_over_rd') as dropped:
+                    diagnostic_flag = dropped
+                    if dropped:
+                        diag_df, diag_pull = datasets['bao'].print_residual_table(
+                            fid_lcdm,
+                            fid_params,
+                            rd_value=147.0,
+                            title='(Lyα DH/rd temporarily removed)',
+                            return_dataframe=True,
+                        )
+                        if save_intermediate and diag_df is not None:
+                            path = run_logger.save_dataframe('diagnostics/fiducial_without_lya_dh.csv', diag_df)
+                            if path:
+                                run_logger.log_event(
+                                    'artifact_saved',
+                                    {'path': str(path)},
+                                    message=f'Saved diagnostic BAO residuals to {path.name}'
+                                )
+                        run_logger.log_event(
+                            'bao_diagnostic.lya_dh_removed',
+                            {'max_abs_pull': diag_pull},
+                            message=f'Diagnostic maximum |pull| (Lyα DH removed) = {diag_pull:.3f}'
+                        )
+                    else:
+                        run_logger.log_event(
+                            'bao_diagnostic.lya_dh_missing',
+                            {},
+                            level=logging.WARNING,
+                            message='Diagnostic request: Lyα DH/rd observable unavailable for removal.'
+                        )
+                if diagnostic_flag:
+                    run_logger.log_event(
+                        'bao_diagnostic.lya_dh_restored',
+                        {},
+                        message='Lyα DH/rd observable restored for covariance-weighted fitting.'
+                    )
+
+        if args.drop_lya_dh and datasets['bao'] is not None:
+            dropped_final = datasets['bao'].drop_observable('DESI Lyα GCcomb', 'DH_over_rd')
+            if dropped_final:
+                run_logger.log_event(
+                    'bao.modify.drop_lya_dh',
+                    {},
+                    message='BAO: Lyα DH/rd observable removed from the final fit.'
+                )
+            else:
+                run_logger.log_event(
+                    'bao.modify.drop_lya_dh_missing',
+                    {},
+                    level=logging.WARNING,
+                    message='BAO: Lyα DH/rd observable not found or already removed.'
+                )
+        elif args.drop_lya_dh and datasets['bao'] is None:
+            run_logger.log_event(
+                'bao.modify.drop_lya_dh_unavailable',
+                {},
+                level=logging.WARNING,
+                message='Cannot drop Lyα DH/rd because BAO data are not loaded.'
+            )
+
+        final_bao_count = datasets['bao'].count_observables() if datasets['bao'] is not None else 0
+        final_bao_entries = len(datasets['bao'].data) if datasets['bao'] else 0
+        final_cov_entries = datasets['bao'].covariance_entry_count() if datasets['bao'] is not None else 0
+        run_logger.log_event(
+            'bao.final_summary',
+            {
+                'observables': final_bao_count,
+                'entry_count': final_bao_entries,
+                'covariance_entries': final_cov_entries,
+            },
+            message=f"BAO (final): {final_bao_count} observables from {final_bao_entries} entries in use"
+        )
+
+        return dataset_summary
+
+    def run_models_command():
+        nonlocal results
+
+        n_data = 0
+        if datasets['bao'] is not None:
+            n_data += datasets['bao'].count_observables()
+        if datasets['sn']:
+            n_data += datasets['sn'].count_points()
+        if datasets['cmb']:
+            n_data += datasets['cmb'].count_observables()
+
+        models_to_fit = []
+        if args.model in ['LCDM', 'both']:
+            models_to_fit.append(LCDMModel())
+        if args.model in ['7D', 'both']:
+            models_to_fit.append(SevenDModel())
+
+        if args.rd_mode == 'fit':
+            models_to_fit = [RDFitWrapper(model) for model in models_to_fit]
+
+        results = {}
+
+        for model in models_to_fit:
+            run_logger.log_event(
+                'model_fit.start',
+                {
+                    'model': model.name,
+                    'parameters': list(model.param_names),
+                    'bounds': list(model.bounds),
+                },
+                message=f"Fitting {model.name} model..."
+            )
+
+            obj = partial(
+                total_chi2,
+                datasets=datasets,
+                model=model,
+                rd_mode=args.rd_mode,
+            )
+
+            try:
+                de_res = differential_evolution(
+                    obj,
+                    bounds=model.bounds,
+                    workers=1,
+                    updating='deferred',
+                    polish=True,
+                    disp=False,
+                    maxiter=args.maxiter,
+                    seed=42,
+                    tol=1e-6,
+                    atol=1e-8
+                )
+
+                theta_hat = np.asarray(de_res.x, dtype=float)
+                param_names = list(model.param_names)
+                dof_candidate = int(n_data - len(param_names))
+
+                covariance_payload = None
+                correlation_payload = None
+                errors_payload = None
+
+                if not de_res.success:
+                    run_logger.log_event(
+                        'model_fit.warning',
+                        {'model': model.name, 'message': str(de_res.message)},
+                        level=logging.WARNING,
+                        message='Optimization did not converge; skipping covariance estimation.'
+                    )
+                elif dof_candidate <= 0:
+                    run_logger.log_event(
+                        'model_fit.warning',
+                        {'model': model.name, 'degrees_of_freedom': dof_candidate},
+                        level=logging.WARNING,
+                        message='Skipping covariance estimation because degrees of freedom are non-positive.'
+                    )
+                else:
+                    try:
+                        cov_result = estimate_covariance(
+                            func=obj,
+                            theta=theta_hat,
+                            param_names=param_names,
+                            bounds=getattr(model, 'bounds', None),
+                            dof=dof_candidate,
+                        )
+                        covariance_payload = {
+                            'param_names': param_names,
+                            'matrix': cov_result.matrix.tolist(),
+                            'condition_number': float(cov_result.condition_number),
+                        }
+                        correlation_payload = {
+                            'param_names': param_names,
+                            'matrix': cov_result.correlation.tolist(),
+                        }
+                        errors_payload = {
+                            key: _finite_float_or_none(value)
+                            for key, value in cov_result.errors.items()
+                        }
+                    except CovarianceComputationError as exc:
+                        run_logger.log_event(
+                            'model_fit.covariance_failed',
+                            {'model': model.name, 'error': str(exc)},
+                            level=logging.WARNING,
+                            message='Covariance estimation failed.'
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        run_logger.log_event(
+                            'model_fit.covariance_exception',
+                            {'model': model.name, 'error': str(exc)},
+                            level=logging.WARNING,
+                            message='Unexpected error during covariance estimation.'
+                        )
+
+                stats = calculate_statistics(de_res.fun, n_data, len(model.param_names))
+
+                best_fit_parameters = {
+                    name: float(value)
+                    for name, value in zip(model.param_names, de_res.x)
+                }
+
+                stats_native = {
+                    'chi2': _finite_float_or_none(stats.get('chi2')),
+                    'dof': int(stats.get('dof', 0)),
+                    'chi2_red': _finite_float_or_none(stats.get('chi2_red')),
+                    'aic': _finite_float_or_none(stats.get('aic')),
+                    'bic': _finite_float_or_none(stats.get('bic')),
+                    'n_data': int(stats.get('n_data', n_data)),
+                    'n_params': int(stats.get('n_params', len(model.param_names)))
+                }
+
+                results[model.name] = {
+                    'success': bool(de_res.success),
+                    'bestfit': best_fit_parameters,
+                    'parameters': best_fit_parameters.copy(),
+                    'chi2': stats_native['chi2'],
+                    'dof': stats_native['dof'],
+                    'chi2_red': stats_native['chi2_red'],
+                    'aic': stats_native['aic'],
+                    'bic': stats_native['bic'],
+                    'n_data': stats_native['n_data'],
+                    'n_params': stats_native['n_params'],
+                    'statistics': stats_native,
+                    'message': str(de_res.message),
+                    'nfev': int(de_res.nfev),
+                    'errors': errors_payload,
+                    'covariance': covariance_payload,
+                    'correlation': correlation_payload
+                }
+
+                run_logger.log_event(
+                    'model_fit.complete',
+                    {
+                        'model': model.name,
+                        'success': bool(de_res.success),
+                        'message': str(de_res.message),
+                        'nfev': int(de_res.nfev),
+                        'statistics': stats_native,
+                    },
+                    message=f"Optimization {'succeeded' if de_res.success else 'failed'} for {model.name}"
+                )
+                bestfit_msg = ', '.join(
+                    f"{name}={value:.6f}" for name, value in zip(model.param_names, de_res.x)
+                )
+                run_logger.log_event(
+                    'model_fit.best_parameters',
+                    {'model': model.name, 'parameters': best_fit_parameters},
+                    message=f"{model.name} best-fit parameters: {bestfit_msg}"
+                )
+
+                for (name, value), (low, high) in zip(zip(model.param_names, de_res.x), model.bounds):
+                    span = high - low
+                    if span <= 0:
+                        continue
+                    lower_frac = (value - low) / span
+                    upper_frac = (high - value) / span
+                    if lower_frac < 0.05 or upper_frac < 0.05:
+                        run_logger.log_event(
+                            'model_fit.parameter_near_bounds',
+                            {
+                                'model': model.name,
+                                'parameter': name,
+                                'value': float(value),
+                                'bounds': [float(low), float(high)],
+                            },
+                            level=logging.WARNING,
+                            message=f"Parameter '{name}' is within 5% of its bounds ({low}, {high})."
+                        )
+
+                run_logger.log_event(
+                    'model_fit.statistics',
+                    {'model': model.name, **stats_native},
+                    message=(
+                        f"{model.name} statistics: χ²={stats_native['chi2']}, χ²/dof={stats_native['chi2_red']}, "
+                        f"AIC={stats_native['aic']}, BIC={stats_native['bic']}"
+                    )
+                )
+
+                if save_intermediate:
+                    if covariance_payload:
+                        cov_path = run_logger.save_json(
+                            Path('covariance') / f"{model.name.lower()}_covariance.json",
+                            covariance_payload,
+                        )
+                        run_logger.log_event(
+                            'artifact_saved',
+                            {'path': str(cov_path)},
+                            message=f'Saved covariance estimate to {cov_path.name}'
+                        )
+                    if correlation_payload:
+                        corr_path = run_logger.save_json(
+                            Path('covariance') / f"{model.name.lower()}_correlation.json",
+                            correlation_payload,
+                        )
+                        run_logger.log_event(
+                            'artifact_saved',
+                            {'path': str(corr_path)},
+                            message=f'Saved correlation matrix to {corr_path.name}'
+                        )
+                    if errors_payload:
+                        err_path = run_logger.save_json(
+                            Path('covariance') / f"{model.name.lower()}_errors.json",
+                            errors_payload,
+                        )
+                        run_logger.log_event(
+                            'artifact_saved',
+                            {'path': str(err_path)},
+                            message=f'Saved parameter errors to {err_path.name}'
+                        )
+
+                if datasets['bao'] is not None and datasets['bao'].count_observables() > 0:
+                    rd_for_residuals = 147.0
+                    if args.rd_mode == 'fit' and 'rd' in model.param_names:
+                        rd_index = model.param_names.index('rd')
+                        rd_candidate = de_res.x[rd_index]
+                        if np.isfinite(rd_candidate) and rd_candidate > 0:
+                            rd_for_residuals = rd_candidate
+                    residual_df, best_pull = datasets['bao'].print_residual_table(
+                        model,
+                        de_res.x,
+                        rd_value=rd_for_residuals,
                         return_dataframe=True,
                     )
-                    if save_intermediate and diag_df is not None:
-                        path = run_logger.save_dataframe('diagnostics/fiducial_without_lya_dh.csv', diag_df)
+                    if save_intermediate and residual_df is not None:
+                        path = run_logger.save_dataframe(
+                            Path('diagnostics') / f"{model.name.lower()}_bao_residuals.csv",
+                            residual_df,
+                        )
                         if path:
                             run_logger.log_event(
                                 'artifact_saved',
                                 {'path': str(path)},
-                                message=f'Saved diagnostic BAO residuals to {path.name}'
+                                message=f'Saved {model.name} BAO residuals to {path.name}'
                             )
                     run_logger.log_event(
-                        'bao_diagnostic.lya_dh_removed',
-                        {'max_abs_pull': diag_pull},
-                        message=f'Diagnostic maximum |pull| (Lyα DH removed) = {diag_pull:.3f}'
+                        'bao_residuals.summary',
+                        {'model': model.name, 'max_abs_pull': best_pull},
+                        message=f"Maximum |pull| at best-fit {model.name}: {best_pull:.3f}"
                     )
-                else:
-                    run_logger.log_event(
-                        'bao_diagnostic.lya_dh_missing',
-                        {},
-                        level=logging.WARNING,
-                        message='Diagnostic request: Lyα DH/rd observable unavailable for removal.'
-                    )
-            if diagnostic_flag:
+
+            except Exception as exc:  # pylint: disable=broad-except
                 run_logger.log_event(
-                    'bao_diagnostic.lya_dh_restored',
-                    {},
-                    message='Lyα DH/rd observable restored for covariance-weighted fitting.'
+                    'model_fit.error',
+                    {'model': model.name, 'error': str(exc)},
+                    level=logging.ERROR,
+                    message=f'ERROR during optimization for {model.name}: {exc}'
+                )
+                results[model.name] = {
+                    'success': False,
+                    'error': str(exc)
+                }
+
+        if 'LCDM' in results and '7D' in results:
+            if results['LCDM'].get('success') and results['7D'].get('success'):
+                delta_aic = results['7D']['statistics']['aic'] - results['LCDM']['statistics']['aic']
+                delta_bic = results['7D']['statistics']['bic'] - results['LCDM']['statistics']['bic']
+                run_logger.log_event(
+                    'model_comparison',
+                    {
+                        'delta_aic': delta_aic,
+                        'delta_bic': delta_bic,
+                    },
+                    message=f"Model comparison ΔAIC (7D-ΛCDM) = {delta_aic:.3f}, ΔBIC = {delta_bic:.3f}"
                 )
 
-    if args.drop_lya_dh and datasets['bao'] is not None:
-        dropped_final = datasets['bao'].drop_observable('DESI Lyα GCcomb', 'DH_over_rd')
-        if dropped_final:
+        return results
+
+    results_path: Path | None = None
+    legacy_output_path: Path | None = None
+
+    def finalize_command():
+        nonlocal results_path, legacy_output_path
+
+        output_relative = Path(args.output)
+        results_path = run_logger.save_json(output_relative, results)
+        run_logger.log_event(
+            'results_saved',
+            {'path': str(results_path)},
+            message=f'Results saved to {results_path}'
+        )
+
+        legacy_output_path = Path(args.output)
+        try:
+            legacy_output_path.parent.mkdir(parents=True, exist_ok=True)
+            with legacy_output_path.open('w', encoding='utf-8') as handle:
+                json.dump(results, handle, indent=2)
+        except Exception as exc:  # pylint: disable=broad-except
             run_logger.log_event(
-                'bao.modify.drop_lya_dh',
-                {},
-                message='BAO: Lyα DH/rd observable removed from the final fit.'
+                'results_legacy_save_failed',
+                {'path': str(legacy_output_path), 'error': str(exc)},
+                level=logging.WARNING,
+                message=f'Warning: Could not save results copy to {legacy_output_path}: {exc}'
             )
         else:
             run_logger.log_event(
-                'bao.modify.drop_lya_dh_missing',
-                {},
-                level=logging.WARNING,
-                message='BAO: Lyα DH/rd observable not found or already removed.'
+                'results_legacy_saved',
+                {'path': str(legacy_output_path.resolve())},
+                message=f'Legacy results copy saved to {legacy_output_path}'
             )
-    elif args.drop_lya_dh and datasets['bao'] is None:
+
+        metadata = build_run_metadata(
+            run_logger,
+            arguments=vars(args),
+            config_snapshot=config_data,
+            dataset_summary=dataset_summary,
+            results_path=results_path,
+            checksums=checksum_entries,
+            extra={'models': list(results.keys())},
+        )
+        metadata_path = run_logger.save_json('run_metadata.json', metadata)
         run_logger.log_event(
-            'bao.modify.drop_lya_dh_unavailable',
-            {},
-            level=logging.WARNING,
-            message='Cannot drop Lyα DH/rd because BAO data are not loaded.'
+            'metadata_saved',
+            {'path': str(metadata_path)},
+            message=f'Run metadata saved to {metadata_path}'
         )
 
-    final_bao_count = datasets['bao'].count_observables() if datasets['bao'] is not None else 0
-    final_bao_entries = len(datasets['bao'].data) if datasets['bao'] else 0
-    final_cov_entries = datasets['bao'].covariance_entry_count() if datasets['bao'] is not None else 0
-    run_logger.log_event(
-        'bao.final_summary',
-        {
-            'observables': final_bao_count,
-            'entry_count': final_bao_entries,
-            'covariance_entries': final_cov_entries,
-        },
-        message=f"BAO (final): {final_bao_count} observables from {final_bao_entries} entries in use"
-    )
-
-    n_data = 0
-    if datasets['bao'] is not None:
-        n_data += datasets['bao'].count_observables()
-    if datasets['sn']:
-        n_data += datasets['sn'].count_points()
-    if datasets['cmb']:
-        n_data += datasets['cmb'].count_observables()
-
-    models_to_fit = []
-    if args.model in ['LCDM', 'both']:
-        models_to_fit.append(LCDMModel())
-    if args.model in ['7D', 'both']:
-        models_to_fit.append(SevenDModel())
-
-    if args.rd_mode == 'fit':
-        models_to_fit = [RDFitWrapper(model) for model in models_to_fit]
-
-    results = {}
-
-    for model in models_to_fit:
         run_logger.log_event(
-            'model_fit.start',
-            {
-                'model': model.name,
-                'parameters': list(model.param_names),
-                'bounds': list(model.bounds),
-            },
-            message=f"Fitting {model.name} model..."
+            'run_complete',
+            {'models': list(results.keys())},
+            message='Run completed.'
         )
 
-        obj = partial(total_chi2,
-                     datasets=datasets,
-                     model=model,
-                     rd_mode=args.rd_mode)
+        return {
+            'results_path': str(results_path),
+            'legacy_output_path': str(legacy_output_path) if legacy_output_path else None,
+            'metadata_path': str(metadata_path),
+        }
 
-        try:
-            de_res = differential_evolution(
-                obj,
-                bounds=model.bounds,
-                workers=1,
-                updating='deferred',
-                polish=True,
-                disp=False,
-                maxiter=args.maxiter,
-                seed=42,
-                tol=1e-6,
-                atol=1e-8
-            )
+    command_set.register('load_datasets', load_datasets_command, 'Load requested datasets')
+    command_set.register('fit_models', run_models_command, 'Fit cosmological models sequentially')
+    command_set.register('finalize', finalize_command, 'Persist results and metadata artifacts')
 
-            theta_hat = np.asarray(de_res.x, dtype=float)
-            param_names = list(model.param_names)
-            dof_candidate = int(n_data - len(param_names))
-
-            covariance_payload = None
-            correlation_payload = None
-            errors_payload = None
-
-            if not de_res.success:
-                run_logger.log_event(
-                    'model_fit.warning',
-                    {'model': model.name, 'message': str(de_res.message)},
-                    level=logging.WARNING,
-                    message='Optimization did not converge; skipping covariance estimation.'
-                )
-            elif dof_candidate <= 0:
-                run_logger.log_event(
-                    'model_fit.warning',
-                    {'model': model.name, 'degrees_of_freedom': dof_candidate},
-                    level=logging.WARNING,
-                    message='Skipping covariance estimation because degrees of freedom are non-positive.'
-                )
-            else:
-                try:
-                    cov_result = estimate_covariance(
-                        func=obj,
-                        theta=theta_hat,
-                        param_names=param_names,
-                        bounds=getattr(model, 'bounds', None),
-                        dof=dof_candidate,
-                    )
-                    covariance_payload = {
-                        'param_names': param_names,
-                        'matrix': cov_result.matrix.tolist(),
-                        'condition_number': float(cov_result.condition_number),
-                    }
-                    correlation_payload = {
-                        'param_names': param_names,
-                        'matrix': cov_result.correlation.tolist(),
-                    }
-                    errors_payload = {
-                        key: _finite_float_or_none(value)
-                        for key, value in cov_result.errors.items()
-                    }
-                except CovarianceComputationError as exc:
-                    run_logger.log_event(
-                        'model_fit.covariance_failed',
-                        {'model': model.name, 'error': str(exc)},
-                        level=logging.WARNING,
-                        message='Covariance estimation failed.'
-                    )
-                except Exception as exc:  # pylint: disable=broad-except
-                    run_logger.log_event(
-                        'model_fit.covariance_exception',
-                        {'model': model.name, 'error': str(exc)},
-                        level=logging.WARNING,
-                        message='Unexpected error during covariance estimation.'
-                    )
-
-            stats = calculate_statistics(de_res.fun, n_data, len(model.param_names))
-
-            best_fit_parameters = {
-                name: float(value)
-                for name, value in zip(model.param_names, de_res.x)
-            }
-
-            stats_native = {
-                'chi2': _finite_float_or_none(stats.get('chi2')),
-                'dof': int(stats.get('dof', 0)),
-                'chi2_red': _finite_float_or_none(stats.get('chi2_red')),
-                'aic': _finite_float_or_none(stats.get('aic')),
-                'bic': _finite_float_or_none(stats.get('bic')),
-                'n_data': int(stats.get('n_data', n_data)),
-                'n_params': int(stats.get('n_params', len(model.param_names)))
-            }
-
-            results[model.name] = {
-                'success': bool(de_res.success),
-                'bestfit': best_fit_parameters,
-                'parameters': best_fit_parameters.copy(),
-                'chi2': stats_native['chi2'],
-                'dof': stats_native['dof'],
-                'chi2_red': stats_native['chi2_red'],
-                'aic': stats_native['aic'],
-                'bic': stats_native['bic'],
-                'n_data': stats_native['n_data'],
-                'n_params': stats_native['n_params'],
-                'statistics': stats_native,
-                'message': str(de_res.message),
-                'nfev': int(de_res.nfev),
-                'errors': errors_payload,
-                'covariance': covariance_payload,
-                'correlation': correlation_payload
-            }
-
-            run_logger.log_event(
-                'model_fit.complete',
-                {
-                    'model': model.name,
-                    'success': bool(de_res.success),
-                    'message': str(de_res.message),
-                    'nfev': int(de_res.nfev),
-                    'statistics': stats_native,
-                },
-                message=f"Optimization {'succeeded' if de_res.success else 'failed'} for {model.name}"
-            )
-            bestfit_msg = ', '.join(f"{name}={value:.6f}" for name, value in zip(model.param_names, de_res.x))
-            run_logger.log_event(
-                'model_fit.best_parameters',
-                {'model': model.name, 'parameters': best_fit_parameters},
-                message=f"{model.name} best-fit parameters: {bestfit_msg}"
-            )
-
-            for (name, value), (low, high) in zip(zip(model.param_names, de_res.x), model.bounds):
-                span = high - low
-                if span <= 0:
-                    continue
-                lower_frac = (value - low) / span
-                upper_frac = (high - value) / span
-                if lower_frac < 0.05 or upper_frac < 0.05:
-                    run_logger.log_event(
-                        'model_fit.parameter_near_bounds',
-                        {
-                            'model': model.name,
-                            'parameter': name,
-                            'value': float(value),
-                            'bounds': [float(low), float(high)],
-                        },
-                        level=logging.WARNING,
-                        message=f"Parameter '{name}' is within 5% of its bounds ({low}, {high})."
-                    )
-
-            run_logger.log_event(
-                'model_fit.statistics',
-                {'model': model.name, **stats_native},
-                message=(
-                    f"{model.name} statistics: χ²={stats_native['chi2']}, χ²/dof={stats_native['chi2_red']}, "
-                    f"AIC={stats_native['aic']}, BIC={stats_native['bic']}"
-                )
-            )
-
-            if save_intermediate:
-                if covariance_payload:
-                    cov_path = run_logger.save_json(
-                        Path('covariance') / f"{model.name.lower()}_covariance.json",
-                        covariance_payload,
-                    )
-                    run_logger.log_event(
-                        'artifact_saved',
-                        {'path': str(cov_path)},
-                        message=f'Saved covariance estimate to {cov_path.name}'
-                    )
-                if correlation_payload:
-                    corr_path = run_logger.save_json(
-                        Path('covariance') / f"{model.name.lower()}_correlation.json",
-                        correlation_payload,
-                    )
-                    run_logger.log_event(
-                        'artifact_saved',
-                        {'path': str(corr_path)},
-                        message=f'Saved correlation matrix to {corr_path.name}'
-                    )
-                if errors_payload:
-                    err_path = run_logger.save_json(
-                        Path('covariance') / f"{model.name.lower()}_errors.json",
-                        errors_payload,
-                    )
-                    run_logger.log_event(
-                        'artifact_saved',
-                        {'path': str(err_path)},
-                        message=f'Saved parameter errors to {err_path.name}'
-                    )
-
-            if datasets['bao'] is not None and datasets['bao'].count_observables() > 0:
-                rd_for_residuals = 147.0
-                if args.rd_mode == 'fit' and 'rd' in model.param_names:
-                    rd_index = model.param_names.index('rd')
-                    rd_candidate = de_res.x[rd_index]
-                    if np.isfinite(rd_candidate) and rd_candidate > 0:
-                        rd_for_residuals = rd_candidate
-                residual_df, best_pull = datasets['bao'].print_residual_table(
-                    model,
-                    de_res.x,
-                    rd_value=rd_for_residuals,
-                    return_dataframe=True,
-                )
-                if save_intermediate and residual_df is not None:
-                    path = run_logger.save_dataframe(
-                        Path('diagnostics') / f"{model.name.lower()}_bao_residuals.csv",
-                        residual_df,
-                    )
-                    if path:
-                        run_logger.log_event(
-                            'artifact_saved',
-                            {'path': str(path)},
-                            message=f'Saved {model.name} BAO residuals to {path.name}'
-                        )
-                run_logger.log_event(
-                    'bao_residuals.summary',
-                    {'model': model.name, 'max_abs_pull': best_pull},
-                    message=f"Maximum |pull| at best-fit {model.name}: {best_pull:.3f}"
-                )
-
-        except Exception as exc:  # pylint: disable=broad-except
-            run_logger.log_event(
-                'model_fit.error',
-                {'model': model.name, 'error': str(exc)},
-                level=logging.ERROR,
-                message=f'ERROR during optimization for {model.name}: {exc}'
-            )
-            results[model.name] = {
-                'success': False,
-                'error': str(exc)
-            }
-
-    if 'LCDM' in results and '7D' in results:
-        if results['LCDM'].get('success') and results['7D'].get('success'):
-            delta_aic = results['7D']['statistics']['aic'] - results['LCDM']['statistics']['aic']
-            delta_bic = results['7D']['statistics']['bic'] - results['LCDM']['statistics']['bic']
-            run_logger.log_event(
-                'model_comparison',
-                {
-                    'delta_aic': delta_aic,
-                    'delta_bic': delta_bic,
-                },
-                message=f"Model comparison ΔAIC (7D-ΛCDM) = {delta_aic:.3f}, ΔBIC = {delta_bic:.3f}"
-            )
-
-    output_relative = Path(args.output)
-    results_path = run_logger.save_json(output_relative, results)
-    run_logger.log_event(
-        'results_saved',
-        {'path': str(results_path)},
-        message=f'Results saved to {results_path}'
-    )
-
-    legacy_output_path = Path(args.output)
-    try:
-        legacy_output_path.parent.mkdir(parents=True, exist_ok=True)
-        with legacy_output_path.open('w', encoding='utf-8') as handle:
-            json.dump(results, handle, indent=2)
-    except Exception as exc:  # pylint: disable=broad-except
-        run_logger.log_event(
-            'results_legacy_save_failed',
-            {'path': str(legacy_output_path), 'error': str(exc)},
-            level=logging.WARNING,
-            message=f'Warning: Could not save results copy to {legacy_output_path}: {exc}'
-        )
-    else:
-        run_logger.log_event(
-            'results_legacy_saved',
-            {'path': str(legacy_output_path.resolve())},
-            message=f'Legacy results copy saved to {legacy_output_path}'
-        )
-
-    metadata = build_run_metadata(
-        run_logger,
-        arguments=vars(args),
-        config_snapshot=config_data,
-        dataset_summary=dataset_summary,
-        results_path=results_path,
-        checksums=checksum_entries,
-        extra={'models': list(results.keys())},
-    )
-    metadata_path = run_logger.save_json('run_metadata.json', metadata)
-    run_logger.log_event(
-        'metadata_saved',
-        {'path': str(metadata_path)},
-        message=f'Run metadata saved to {metadata_path}'
-    )
-
-    run_logger.log_event(
-        'run_complete',
-        {'models': list(results.keys())},
-        message='Run completed.'
-    )
+    command_set.execute()
 
     return results
 
 
 def cli():
-    if sys.platform.startswith('win'):
-        mp.freeze_support()
     try:
         main()
     except ConfigValidationError as exc:

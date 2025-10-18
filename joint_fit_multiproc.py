@@ -5,7 +5,6 @@ joint_fit_patched_multiproc5.py
 멀티프로세싱 지원 및 오류 처리 강화 버전
 """
 
-import multiprocessing as mp
 import sys
 import warnings
 from dataclasses import dataclass
@@ -34,10 +33,6 @@ class CovarianceResult:
     correlation: np.ndarray
     errors: dict
     condition_number: float
-
-# 멀티프로세싱 관련 설정
-if sys.platform == "darwin":  # macOS
-    mp.set_start_method('fork', force=True)
 
 # ==================== 우주론 모델 정의 ====================
 
