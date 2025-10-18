@@ -118,8 +118,19 @@ def run_beta_stability(
         bin_indices = np.digitize(z, edges) - 1
         bin_centers = 0.5 * (edges[:-1] + edges[1:])
     else:
-        edges = None
-        bin_centers, bin_indices = np.unique(z, return_inverse=True)
+        unique_z, bin_indices = np.unique(z, return_inverse=True)
+        if unique_z.size <= 10:
+            edges = None
+            bin_centers = unique_z
+        else:
+            max_bins = min(50, int(unique_z.size))
+            target_bins = max(10, int(round(math.sqrt(unique_z.size))))
+            n_bins = max(1, min(max_bins, target_bins))
+            # Use evenly spaced bins across the observed range to avoid
+            # degenerating into per-sample bins when ``z`` is dense.
+            edges = np.linspace(unique_z.min(), unique_z.max(), num=n_bins + 1)
+            bin_indices = np.clip(np.digitize(z, edges) - 1, 0, n_bins - 1)
+            bin_centers = 0.5 * (edges[:-1] + edges[1:])
 
     bin_results: List[BetaBinResult] = []
     bin_labels: List[str] = []
@@ -175,6 +186,24 @@ def run_beta_stability(
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.errorbar(x_positions, slopes, yerr=slope_uncertainties, fmt="o", label="β₁")
+    slope_uncertainty_array = np.asarray(slope_uncertainties, dtype=float)
+    if slope_uncertainty_array.size:
+        finite_uncertainties = slope_uncertainty_array[np.isfinite(slope_uncertainty_array)]
+        ypad = (
+            2.0 * float(np.mean(finite_uncertainties)) if finite_uncertainties.size else 0.0
+        )
+    else:
+        ypad = 0.0
+    y_lower = min(slopes)
+    y_upper = max(slopes)
+    if ypad > 0.0:
+        y_lower -= ypad
+        y_upper += ypad
+    if y_lower == y_upper:
+        fallback_pad = 0.05 * max(1.0, abs(y_upper))
+        y_lower -= fallback_pad
+        y_upper += fallback_pad
+    ax.set_ylim(y_lower, y_upper)
     for idx, result in enumerate(bin_results):
         if result.approximation is None:
             continue
