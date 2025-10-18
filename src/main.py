@@ -119,8 +119,12 @@ def _build_parsers():
                         help='Remove the Lyα DH/rd point from the final fit')
     parser.add_argument('--diagnose-lya-dh', action='store_true',
                         help='Temporarily inspect residuals without the Lyα DH/rd point before fitting')
-    parser.add_argument('--workers', type=int,
-                        help='Number of workers for parallelization (-1 for all CPUs)')
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        help='Number of workers for parallelization (single-worker mode enforced)'
+    )
     parser.add_argument('--maxiter', type=int,
                         help='Maximum iterations for optimization')
     parser.add_argument('--output', type=str,
@@ -165,8 +169,11 @@ def _summarize_bao(bao_data: BAOData, source: str, use_covariance: bool, include
 
 
 def _ensure_workers(args):
-    if args.workers == -1:
-        args.workers = mp.cpu_count()
+    requested = args.workers if args.workers is not None else 1
+    if requested <= 0:
+        requested = 1
+    args.requested_workers = requested
+    args.workers = 1
     return args
 
 
@@ -187,7 +194,7 @@ def main():
     parser.set_defaults(
         model=run_defaults.get('model', 'both'),
         rd_mode=run_defaults.get('rd_mode', 'fixed'),
-        workers=run_defaults.get('workers', -1),
+        workers=run_defaults.get('workers', 1),
         maxiter=run_defaults.get('maxiter', 1000),
         output=run_defaults.get('output', 'fit_results.json'),
         use_cmb=cmb_defaults.get('enabled', False),
@@ -206,17 +213,21 @@ def main():
             'config_path': args.config,
             'model': args.model,
             'rd_mode': args.rd_mode,
+            'requested_workers': getattr(args, 'requested_workers', args.workers),
             'workers': args.workers,
+            'parallel_mode': 'single_worker',
         },
-        message='=== 7D Cosmology Joint Fitting ==='
+        message='=== 7D Cosmology Joint Fitting (single-worker execution) ==='
     )
     run_logger.log_event(
         'runtime_configuration',
         {
             'save_intermediate': bool(run_defaults.get('save_intermediate', False)),
             'output': args.output,
+            'requested_workers': getattr(args, 'requested_workers', args.workers),
+            'parallel_mode': 'single_worker',
         },
-        message=f"Using {args.workers} workers for parallel computation"
+        message='Running in single-worker mode; parallel computation is disabled'
     )
 
     bao_config = _merge_section(config_data, 'bao')
@@ -553,7 +564,7 @@ def main():
             de_res = differential_evolution(
                 obj,
                 bounds=model.bounds,
-                workers=args.workers,
+                workers=1,
                 updating='deferred',
                 polish=True,
                 disp=False,
