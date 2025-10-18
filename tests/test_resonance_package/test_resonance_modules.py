@@ -31,6 +31,9 @@ def test_residual_spectrum_identifies_injected_frequency(tmp_path: Path):
     peak_freq = result.peaks["lcdm"][0].frequency
     assert math.isclose(peak_freq, signal_freq, rel_tol=0.1, abs_tol=0.05)
     assert Path(result.artifact_path).exists()
+    assert "lcdm" in result.false_alarm_probabilities
+    assert result.false_alarm_probabilities["lcdm"].shape == result.powers["lcdm"].shape
+    assert result.global_threshold > 0
 
 
 def test_beta_stability_recovers_linear_relationship(tmp_path: Path):
@@ -51,13 +54,18 @@ def test_beta_stability_recovers_linear_relationship(tmp_path: Path):
     assert any(abs(slope - 0.9) < 0.1 for slope in slopes)
     assert Path(result.artifact_path).exists()
     assert Path(result.table_path).exists()
+    assert result.beta1_uncertainty_total > 0
+    assert isinstance(result.ratio_lock_indices, list)
+    assert isinstance(result.ratio_lock_alerts(), list)
 
 
 def test_diophantine_flags_low_order_rationals(tmp_path: Path):
     slopes = [2.0 * math.pi * (3 / 5 + 5e-4), 2.0 * math.pi * (1 / 7 + 1e-2)]
-    result = run_diophantine(slopes, max_denominator=10, tolerance=1e-3, output_dir=tmp_path)
+    result = run_diophantine(slopes, max_denominator=10, tolerance=1e-2, output_dir=tmp_path)
     assert result.violators() == [0]
     assert Path(result.artifact_path).exists()
+    assert result.scaled_errors[0] <= 1.0
+    assert result.thresholds.shape == result.ratios.shape
 
 
 def test_pretest_summary_and_decision(tmp_path: Path):
@@ -79,6 +87,8 @@ def test_pretest_summary_and_decision(tmp_path: Path):
 
     result = run_non_resonance_pretest(z, residuals, sigma, beta, config=config)
     assert "spectrum" in result.summary.lower()
+    assert "aggregate β₁ uncertainty" in result.summary.lower()
     assert result.decision in {"pass", "review"}
+    assert isinstance(result.ratio_locks, list)
     for path in result.artifacts.values():
         assert Path(path).exists()

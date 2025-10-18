@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional
 
 from .beta_stability import BetaStabilityResult, run_beta_stability
 from .diophantine_check import DiophantineResult, run_diophantine
@@ -38,6 +38,7 @@ class PretestResult:
     decision: str
     summary: str
     artifacts: dict
+    ratio_locks: List[str]
 
 
 def run_non_resonance_pretest(
@@ -104,6 +105,7 @@ def run_non_resonance_pretest(
         name: peaks for name, peaks in spectrum.significant_series().items() if peaks
     }
     beta_alerts = beta_result.rational_alerts()
+    ratio_locks = beta_result.ratio_lock_alerts()
     diophantine_alerts = diophantine.violators()
 
     summary_lines = []
@@ -127,6 +129,17 @@ def run_non_resonance_pretest(
         )
     else:
         summary_lines.append("β stability detected no rational-ratio concerns.")
+
+    if ratio_locks:
+        summary_lines.append(
+            "Ratio-lock alerts: " + ", ".join(ratio_locks)
+        )
+    else:
+        summary_lines.append("No ratio-lock behaviour detected.")
+
+    summary_lines.append(
+        f"Aggregate β₁ uncertainty: {beta_result.beta1_uncertainty_total:.3g}"
+    )
 
     if diophantine_alerts:
         summary_lines.append(
@@ -153,4 +166,5 @@ def run_non_resonance_pretest(
         decision=decision,
         summary="\n".join(summary_lines),
         artifacts=artifacts,
+        ratio_locks=ratio_locks,
     )

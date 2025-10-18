@@ -12,7 +12,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .utils import ensure_directory, estimate_fap, lomb_scargle_power, weighted_linear_regression
+from .utils import (
+    ensure_directory,
+    estimate_fap,
+    false_alarm_threshold,
+    lomb_scargle_power,
+    weighted_linear_regression,
+)
 
 @dataclass
 class SpectrumPeak:
@@ -29,8 +35,10 @@ class ResidualSpectrumResult:
 
     frequencies: np.ndarray
     powers: Dict[str, np.ndarray]
+    false_alarm_probabilities: Dict[str, np.ndarray]
     peaks: Dict[str, List[SpectrumPeak]]
     alpha: float
+    global_threshold: float
     artifact_path: Path
 
     def significant_series(self) -> Dict[str, List[SpectrumPeak]]:
@@ -86,14 +94,15 @@ def _compute_series(
     weights: np.ndarray,
     angular_frequencies: np.ndarray,
     top_n: int,
-    alpha: float,
+    trials: int,
 ) -> List[SpectrumPeak]:
     """Compute and rank Lomb–Scargle peaks for the provided ``series``."""
 
     power = lomb_scargle_power(z, series, weights, angular_frequencies)
-    trials = len(angular_frequencies)
     fap = estimate_fap(power, trials)
     n_peaks = min(top_n, len(power))
+    if n_peaks == 0:
+        return []
     top_indices = np.argpartition(power, -n_peaks)[-n_peaks:]
     ordering = top_indices[np.argsort(power[top_indices])[::-1]]
     peaks = [
@@ -188,17 +197,25 @@ def run_residual_spectrum(
 
     power_dict: Dict[str, np.ndarray] = {}
     peaks_dict: Dict[str, List[SpectrumPeak]] = {}
+    fap_dict: Dict[str, np.ndarray] = {}
+
+    trials = len(angular) * len(series_dict)
 
     for name, series in detrended.items():
         power = lomb_scargle_power(z, series, weights_arr, angular)
+        fap = estimate_fap(power, trials)
+        peaks = _compute_series(name, z, series, weights_arr, angular, top_n, trials)
         power_dict[name] = power
-        peaks = _compute_series(name, z, series, weights_arr, angular, top_n, alpha)
+        fap_dict[name] = fap
         peaks_dict[name] = peaks
+
+    threshold = false_alarm_threshold(alpha, trials)
 
     output_path = ensure_directory(output_dir) / "residual_spectrum.png"
     fig, ax = plt.subplots(figsize=(8, 4))
     for name, power in power_dict.items():
         ax.plot(freq_grid, power, label=name.upper())
+    ax.axhline(threshold, color="tab:red", linestyle="--", linewidth=1.2, label=f"FAP={alpha:.2g}")
     ax.set_xlabel("Frequency [cycles per z]")
     ax.set_ylabel("Lomb–Scargle Power")
     ax.set_title("Residual Lomb–Scargle Spectrum")
@@ -211,7 +228,9 @@ def run_residual_spectrum(
     return ResidualSpectrumResult(
         frequencies=freq_grid,
         powers=power_dict,
+        false_alarm_probabilities=fap_dict,
         peaks=peaks_dict,
         alpha=alpha,
+        global_threshold=threshold,
         artifact_path=output_path,
     )

@@ -229,3 +229,23 @@ def estimate_fap(power: np.ndarray, trials: int) -> np.ndarray:
     if trials <= 0:
         raise ValueError("trials must be positive")
     return 1.0 - (1.0 - np.exp(-power)) ** trials
+
+
+def false_alarm_threshold(alpha: float, trials: int) -> float:
+    """Return the Lomb–Scargle power threshold for a global false alarm ``alpha``.
+
+    The returned power corresponds to the value whose false-alarm probability,
+    evaluated assuming ``trials`` independent frequencies, equals ``alpha``.
+    """
+
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must lie within (0, 1)")
+    if trials <= 0:
+        raise ValueError("trials must be positive")
+    # Invert ``alpha = 1 - (1 - exp(-z)) ** trials`` with respect to ``z``.
+    base = 1.0 - alpha
+    exponent = base ** (1.0 / trials)
+    inner = 1.0 - exponent
+    if inner <= 0.0:
+        return float("inf")
+    return float(-math.log(inner))

@@ -39,11 +39,18 @@ class BetaStabilityResult:
     bins: List[BetaBinResult]
     artifact_path: Path
     table_path: Path
+    beta1_uncertainty_total: float
+    ratio_lock_indices: List[int]
 
     def rational_alerts(self) -> List[BetaBinResult]:
         """Return bins that triggered a low-order rational approximation alert."""
 
         return [bin_result for bin_result in self.bins if bin_result.approximation is not None]
+
+    def ratio_lock_alerts(self) -> List[str]:
+        """Return the labels of bins exhibiting a rational ratio lock."""
+
+        return [self.bins[idx].bin_label for idx in self.ratio_lock_indices]
 
 
 def _format_bin_label(index: int, centers: np.ndarray, *, edges: Optional[np.ndarray] = None) -> str:
@@ -152,6 +159,11 @@ def run_beta_stability(
     if not bin_results:
         raise ValueError("No populated bins available for β stability analysis")
 
+    ratio_lock_indices = [idx for idx, result in enumerate(bin_results) if result.approximation is not None]
+    beta1_uncertainty_total = math.sqrt(
+        sum(result.beta1_uncertainty ** 2 for result in bin_results)
+    )
+
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.errorbar(
         np.arange(len(slopes)),
@@ -207,4 +219,10 @@ def run_beta_stability(
                 ]
             )
 
-    return BetaStabilityResult(bin_results, output_path, table_path)
+    return BetaStabilityResult(
+        bins=bin_results,
+        artifact_path=output_path,
+        table_path=table_path,
+        beta1_uncertainty_total=float(beta1_uncertainty_total),
+        ratio_lock_indices=ratio_lock_indices,
+    )
