@@ -190,6 +190,9 @@ def main():
     run_defaults = config_data.get('run', {})
     bao_defaults = _merge_section(config_data, 'bao')
     cmb_defaults = _merge_section(config_data, 'cmb')
+    seven_d_config = config_data.get('seven_d') or {}
+    if not isinstance(seven_d_config, dict):
+        raise ConfigValidationError("Configuration section 'seven_d' must be a mapping if provided")
 
     parser.set_defaults(
         model=run_defaults.get('model', 'both'),
@@ -537,7 +540,10 @@ def main():
     if args.model in ['LCDM', 'both']:
         models_to_fit.append(LCDMModel())
     if args.model in ['7D', 'both']:
-        models_to_fit.append(SevenDModel())
+        try:
+            models_to_fit.append(SevenDModel.from_config(seven_d_config))
+        except ValueError as exc:
+            raise ConfigValidationError(f"Invalid seven_d configuration: {exc}") from exc
 
     if args.rd_mode == 'fit':
         models_to_fit = [RDFitWrapper(model) for model in models_to_fit]
