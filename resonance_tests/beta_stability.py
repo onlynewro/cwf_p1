@@ -118,8 +118,19 @@ def run_beta_stability(
         bin_indices = np.digitize(z, edges) - 1
         bin_centers = 0.5 * (edges[:-1] + edges[1:])
     else:
-        edges = None
-        bin_centers, bin_indices = np.unique(z, return_inverse=True)
+        unique_z, bin_indices = np.unique(z, return_inverse=True)
+        if unique_z.size <= 10:
+            edges = None
+            bin_centers = unique_z
+        else:
+            max_bins = min(50, int(unique_z.size))
+            target_bins = max(10, int(round(math.sqrt(unique_z.size))))
+            n_bins = max(1, min(max_bins, target_bins))
+            # Use evenly spaced bins across the observed range to avoid
+            # degenerating into per-sample bins when ``z`` is dense.
+            edges = np.linspace(unique_z.min(), unique_z.max(), num=n_bins + 1)
+            bin_indices = np.clip(np.digitize(z, edges) - 1, 0, n_bins - 1)
+            bin_centers = 0.5 * (edges[:-1] + edges[1:])
 
     bin_results: List[BetaBinResult] = []
     bin_labels: List[str] = []
